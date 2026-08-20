@@ -1,25 +1,30 @@
 import os
 os.environ['TZ'] = 'UTC'
-import requests
-from flask import Flask, request
-from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Dispatcher, CommandHandler, CallbackQueryHandler, ContextTypes
-import logging
-import sqlite3
-from datetime import datetime
 import asyncio
+import time
+import sqlite3
+import requests
+from datetime import datetime
+from flask import Flask
+from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+import logging
 
 # ======== تنظیمات ========
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN environment variable not set!")
-WEBHOOK_URL = os.environ.get('RENDER_EXTERNAL_URL', 'https://crypfx-bot-1.onrender.com')
+INTERVAL = 60
+TIMEOUT = 30
 # =========================
 
 logging.basicConfig(level=logging.ERROR)
 
-app = Flask(__name__)
-bot = Bot(token=TELEGRAM_TOKEN)
+# ======== لیست نمادها (برای تست با یک نماد ساده) ========
+SYMBOLS = [
+    ('btc', 'BTC', '₿'),
+    ('eth', 'ETH', '💎'),
+]
 
 # ======== دیتابیس ========
 DB_PATH = "market_data.db"
@@ -29,18 +34,8 @@ def init_db():
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS prices
                  (symbol TEXT, timestamp TEXT, price REAL, PRIMARY KEY (symbol, timestamp))''')
-    c.execute('''CREATE TABLE IF NOT EXISTS history
-                 (symbol TEXT, timestamp TEXT, price REAL)''')
     c.execute('''CREATE TABLE IF NOT EXISTS user_selections
                  (user_id INTEGER, symbol TEXT, PRIMARY KEY (user_id, symbol))''')
-    conn.commit()
-    conn.close()
-
-def save_price(symbol, price):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('INSERT INTO prices (symbol, timestamp, price) VALUES (?, ?, ?)',
-              (symbol, datetime.now().isoformat(), price))
     conn.commit()
     conn.close()
 
@@ -51,6 +46,14 @@ def get_last_price(symbol):
     row = c.fetchone()
     conn.close()
     return row[0] if row else None
+
+def save_price(symbol, price):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('INSERT INTO prices (symbol, timestamp, price) VALUES (?, ?, ?)',
+              (symbol, datetime.now().isoformat(), price))
+    conn.commit()
+    conn.close()
 
 def get_user_selections(user_id):
     conn = sqlite3.connect(DB_PATH)
@@ -90,22 +93,10 @@ def select_all_symbols(user_id):
     conn.commit()
     conn.close()
 
-# ======== لیست نمادها ========
-SYMBOLS = [
-    ('btc', 'BTC', '₿'), ('eth', 'ETH', '💎'), ('bnb', 'BNB', '🟡'),
-    ('gram', 'GRAM', '🔷'), ('xrp', 'XRP', '💠'), ('sol', 'SOL', '☀️'),
-    ('doge', 'DOGE', '🐕'), ('bch', 'BCH', '🔶'), ('ltc', 'LTC', '⚡'),
-    ('trx', 'TRX', '🔴'), ('dot', 'DOT', '🟣'), ('gold', 'GOLD', '🏆'),
-    ('silver', 'SILVER', '🥈'), ('oil', 'OIL', '🛢️'), ('brent', 'BRENT', '🛢️'),
-    ('gas', 'GAS', '🔥'), ('sugar', 'SUGAR', '🍬')
-]
-
-# ======== دریافت قیمت ========
+# ======== دریافت قیمت (ساده برای تست) ========
 def get_price(symbol_key):
-    # اینجا فقط یک نمونه ساده از دریافت قیمت قراره
-    # برای مثال، یک عدد ثابت برمی‌گردونیم تا ربات تست بشه
+    # برای تست، یک عدد ثابت برمی‌گردانیم
     return 123.45
-    # (شما می‌تونید کد کامل دریافت قیمت از یاهو رو اینجا قرار بدید)
 
 # ======== توابع ربات ========
 async def start(update, context):
@@ -116,7 +107,6 @@ async def start(update, context):
 async def show_menu(chat_id, user_id):
     text = "📊 **SELECT SYMBOLS**\n\n"
     text += "✅ Click to select/deselect.\n"
-    text += "📊 **SHOW ALL** = select all symbols & start.\n"
     text += "After selection, click **🚀 START**.\n\n"
     text += "**SELECTED:**\n"
     selections = get_user_selections(user_id)
@@ -128,6 +118,7 @@ async def show_menu(chat_id, user_id):
                     break
     else:
         text += "No symbols selected."
+    
     keyboard = []
     for key, name, emoji in SYMBOLS:
         checked = "✅ " if key in selections else ""
@@ -138,7 +129,8 @@ async def show_menu(chat_id, user_id):
     keyboard.append([InlineKeyboardButton("🗑️ CLEAR ALL", callback_data="clear_all")])
     keyboard.append([InlineKeyboardButton("📋 DATABASE", callback_data="status")])
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await bot.send_message(chat_id, text, parse_mode='Markdown', reply_markup=reply_markup)
+    
+    await context.bot.send_message(chat_id, text, parse_mode='Markdown', reply_markup=reply_markup)
 
 async def button_handler(update, context):
     query = update.callback_query
@@ -146,31 +138,40 @@ async def button_handler(update, context):
     user_id = query.from_user.id
     chat_id = query.message.chat.id
     data = query.data
-    if data == "menu":
-        await show_menu(chat_id, user_id)
-        return
+    
     if data == "status":
-        await status_db(chat_id)
+        report = "📊 **DATABASE STATUS**\n"
+        for key, name, emoji in SYMBOLS:
+            price = get_last_price(key)
+            report += f"🔹 {name}: {price if price else 'N/A'}\n"
+        await context.bot.send_message(chat_id, report)
         return
+    
     if data == "clear_all":
         clear_user_selections(user_id)
         await query.edit_message_text("🗑️ All selections cleared.")
         await show_menu(chat_id, user_id)
         return
+    
     if data == "select_all":
         select_all_symbols(user_id)
-        await query.edit_message_text("📊 **SHOW ALL activated!**")
+        await query.edit_message_text("📊 All symbols selected!")
+        await show_menu(chat_id, user_id)
         return
+    
     if data == "start_sending":
         selections = get_user_selections(user_id)
         if not selections:
             await query.edit_message_text("⚠️ Select at least one symbol.")
             return
         await query.edit_message_text("🚀 **Auto-send started!**\nUpdates every 1 minute.")
+        # در اینجا می‌توانید حلقه ارسال خودکار را شروع کنید
         return
+    
     if data == "stop_sending":
         await query.edit_message_text("🛑 **Auto-send stopped.**")
         return
+    
     if data.startswith("toggle_"):
         symbol = data.replace("toggle_", "")
         selections = get_user_selections(user_id)
@@ -181,37 +182,37 @@ async def button_handler(update, context):
         await show_menu(chat_id, user_id)
         return
 
-async def status_db(chat_id):
-    report = "📊 **DATABASE STATUS**\n"
-    for key, name, emoji in SYMBOLS:
-        price = get_last_price(key)
-        report += f"🔹 {name}: {price if price else 'N/A'}\n"
-    await bot.send_message(chat_id, report)
+# ======== وب‌سرور Flask برای Render ========
+flask_app = Flask(__name__)
 
-# ======== Webhook ========
-@app.route('/', methods=['GET'])
-def index():
+@flask_app.route('/')
+def home():
     return "✅ Bot is running!"
 
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    update = Update.de_json(request.get_json(), bot)
-    dispatcher.process_update(update)
-    return "ok"
-
-# ======== تنظیم Webhook ========
-def set_webhook():
-    url = f"{WEBHOOK_URL}/webhook"
-    bot.delete_webhook()
-    bot.set_webhook(url=url)
-    print(f"✅ Webhook set to {url}")
-
-# ======== اجرا ========
-if __name__ == '__main__':
+# ======== اجرای اصلی (بدون ترد، در همین جا) ========
+async def main():
     init_db()
-    dispatcher = Dispatcher(bot, None, use_context=True)
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(CallbackQueryHandler(button_handler))
-    set_webhook()
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port)
+    app = Application.builder().token(TELEGRAM_TOKEN).connect_timeout(TIMEOUT).read_timeout(TIMEOUT).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    
+    print("🤖 Bot started...")
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    
+    # Flask را در یک ترد جداگانه اجرا می‌کنیم (اما ربات در main thread اجرا می‌شود)
+    import threading
+    def run_flask():
+        port = int(os.environ.get('PORT', 10000))
+        flask_app.run(host='0.0.0.0', port=port)
+    
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    # منتظر می‌مانیم تا ربات کار کند
+    while True:
+        await asyncio.sleep(1)
+
+if __name__ == "__main__":
+    asyncio.run(main())
