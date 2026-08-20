@@ -453,7 +453,7 @@ def run_bot_polling():
     app.add_handler(CallbackQueryHandler(button_handler))
     print("🤖 Bot polling started...")
     # اضافه کردن signal_handlers=False برای رفع خطا
-    app.run_polling(signal_handlers=False)
+    app.run_polling()
 
 def run_web_server():
     flask_app = Flask(__name__)
