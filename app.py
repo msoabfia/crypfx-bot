@@ -70,7 +70,7 @@ CATEGORIES = {
     }
 }
 
-# ======== دریافت قیمت دلار (فقط برای تتر) ========
+# ======== دریافت قیمت دلار (برای تبدیل تتر به تومان) ========
 def fetch_usd_price():
     try:
         resp = requests.get('https://www.tgju.org/', timeout=10)
@@ -163,13 +163,10 @@ def get_price_change(symbol_key, current_price):
 def is_market_open(symbol_key):
     now = datetime.now()
     today = now.weekday()
-    # کریپتوها (به جز شکر) ۲۴/۷
     if symbol_key in ['btc', 'eth', 'bnb', 'gram', 'xrp', 'sol', 'doge', 'bch', 'ltc', 'trx', 'dot', 'usdt']:
         return True
-    # یکشنبه تعطیل
     if today == 6:
         return False
-    # شکر: ساعت خاص
     if symbol_key == 'sugar':
         iran_hour = (now.hour + 3) % 24
         iran_minute = now.minute + 30
@@ -179,7 +176,6 @@ def is_market_open(symbol_key):
         if iran_hour >= 12 and (iran_hour < 21 or (iran_hour == 21 and iran_minute <= 30)):
             return True
         return False
-    # بقیه کالاها: فقط یکشنبه تعطیل
     return True
 
 # ======== دیتابیس ========
@@ -269,8 +265,10 @@ async def send_message(chat_id, text, parse_mode='Markdown', reply_markup=None):
 def format_price(price, symbol_key, usd_price=None):
     if price is None:
         return "⛔ در دسترس نیست"
+    # تتر به تومان
     if symbol_key == 'usdt' and usd_price:
         return f"{price * usd_price:,.0f} تومان"
+    # بقیه به دلار (بدون نوشتن واحد)
     if price < 0.001:
         return f"{price:.4e}"
     elif price < 1:
@@ -293,7 +291,6 @@ def format_change(change):
         return f"📉 {change:+.2f}%"
 
 def format_price_with_market_status(symbol_key, price, usd_price):
-    """نمایش قیمت با وضعیت بازار"""
     if price is None:
         cached = get_last_price(symbol_key)
         if cached:
@@ -572,7 +569,6 @@ def run_flask():
     port = int(os.environ.get('PORT', 10000))
     flask_app.run(host='0.0.0.0', port=port)
 
-# ======== ارسال پیام "ربات آپدیت شد" هنگام ری‌استارت ========
 async def send_update_message():
     try:
         bot = Bot(token=TELEGRAM_TOKEN)
