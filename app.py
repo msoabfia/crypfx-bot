@@ -70,14 +70,14 @@ CATEGORIES = {
     }
 }
 
-# ======== دریافت قیمت دلار (برای تبدیل تتر به تومان) ========
+# ======== دریافت نرخ دلار از Nobitex (بدون فیلتر) ========
 def fetch_usd_price():
     try:
-        resp = requests.get('https://www.tgju.org/', timeout=10)
-        match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
-        if match:
-            price = match.group(1).replace(',', '')
-            return int(price)
+        resp = requests.get('https://api.nobitex.ir/market/stats?srcCurrency=usdt&dstCurrency=rls', timeout=10)
+        data = resp.json()
+        if 'stats' in data and 'usdt-rls' in data['stats']:
+            price = data['stats']['usdt-rls']['bestSell']
+            return int(float(price))
         return None
     except:
         return None
