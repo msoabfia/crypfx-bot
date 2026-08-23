@@ -25,13 +25,14 @@ TIMEOUT = 30
 
 logging.basicConfig(level=logging.ERROR)
 
-# ======== دسته‌بندی نمادها ========
+# ======== دسته‌بندی نمادها (تتر دلاری حذف شد) ========
 CATEGORIES = {
     'crypto': {
         'name': 'ارزهای دیجیتال',
         'emoji': '💰',
         'symbols': [
-            ('usdt', 'USDT', '💵'),
+            ('usdt_rial', 'تتر (ریال)', '💰'),
+            ('aed', 'درهم امارات', '🇦🇪'),
             ('btc', 'BTC', '₿'),
             ('eth', 'ETH', '💎'),
             ('bnb', 'BNB', '🟡'),
@@ -113,11 +114,20 @@ def fetch_coingecko(symbol):
         return None
 
 def get_price(symbol_key):
-    if symbol_key == 'usdt':
-        price = fetch_twelve('USDT/USD')
-        if price:
-            return price
-        return fetch_coingecko('tether')
+    usd_price = fetch_usd_price()
+    
+    if symbol_key == 'usdt_rial':
+        price = fetch_twelve('USDT/USD') or fetch_coingecko('tether')
+        if price and usd_price:
+            return price * usd_price
+        return None
+    
+    elif symbol_key == 'aed':
+        aed_usd = fetch_yahoo('AED=X')
+        if aed_usd and usd_price:
+            return aed_usd * usd_price
+        return None
+    
     elif symbol_key == 'btc':
         return fetch_yahoo('BTC-USD') or fetch_twelve('BTC/USD')
     elif symbol_key == 'eth':
@@ -163,10 +173,13 @@ def get_price_change(symbol_key, current_price):
 def is_market_open(symbol_key):
     now = datetime.now()
     today = now.weekday()
-    if symbol_key in ['btc', 'eth', 'bnb', 'gram', 'xrp', 'sol', 'doge', 'bch', 'ltc', 'trx', 'dot', 'usdt']:
+    # کریپتوها و ارزها ۲۴/۷
+    if symbol_key in ['btc', 'eth', 'bnb', 'gram', 'xrp', 'sol', 'doge', 'bch', 'ltc', 'trx', 'dot', 'usdt_rial', 'aed']:
         return True
+    # یکشنبه تعطیل
     if today == 6:
         return False
+    # شکر: ساعت خاص
     if symbol_key == 'sugar':
         iran_hour = (now.hour + 3) % 24
         iran_minute = now.minute + 30
@@ -176,6 +189,7 @@ def is_market_open(symbol_key):
         if iran_hour >= 12 and (iran_hour < 21 or (iran_hour == 21 and iran_minute <= 30)):
             return True
         return False
+    # بقیه کالاها: فقط یکشنبه تعطیل
     return True
 
 # ======== دیتابیس ========
@@ -262,12 +276,14 @@ async def send_message(chat_id, text, parse_mode='Markdown', reply_markup=None):
     bot = Bot(token=TELEGRAM_TOKEN)
     await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, reply_markup=reply_markup)
 
-def format_price(price, symbol_key, usd_price=None):
+def format_price(price, symbol_key):
     if price is None:
         return "⛔ در دسترس نیست"
-    # تتر به تومان
-    if symbol_key == 'usdt' and usd_price:
-        return f"{price * usd_price:,.0f} تومان"
+    
+    # قیمت‌های ریالی (تتر ریال و درهم)
+    if symbol_key in ['usdt_rial', 'aed']:
+        return f"{price:,.0f} ریال"
+    
     # بقیه به دلار (بدون نوشتن واحد)
     if price < 0.001:
         return f"{price:.4e}"
@@ -290,11 +306,11 @@ def format_change(change):
     else:
         return f"📉 {change:+.2f}%"
 
-def format_price_with_market_status(symbol_key, price, usd_price):
+def format_price_with_market_status(symbol_key, price):
     if price is None:
         cached = get_last_price(symbol_key)
-        if cached:
-            formatted = format_price(cached, symbol_key, usd_price)
+        if cached is not None:
+            formatted = format_price(cached, symbol_key)
             change = get_price_change(symbol_key, cached)
             change_text = format_change(change)
             market_status = " 🔒 بازار بسته"
@@ -303,7 +319,7 @@ def format_price_with_market_status(symbol_key, price, usd_price):
             return f"{formatted}{market_status}"
         return "⛔ در دسترس نیست"
     
-    formatted = format_price(price, symbol_key, usd_price)
+    formatted = format_price(price, symbol_key)
     change = get_price_change(symbol_key, price)
     change_text = format_change(change)
     market_status = ""
@@ -314,7 +330,6 @@ def format_price_with_market_status(symbol_key, price, usd_price):
     return f"{formatted}{market_status}"
 
 def generate_price_message(selections):
-    usd_price = fetch_usd_price()
     lines = []
     for cat_key, cat in CATEGORIES.items():
         cat_selected = [s for s in cat['symbols'] if s[0] in selections]
@@ -323,9 +338,9 @@ def generate_price_message(selections):
         lines.append(f"{cat['emoji']} {cat['name']}:")
         for key, name, emoji in cat_selected:
             price = get_price(key)
-            if price:
+            if price is not None:
                 save_price(key, price)
-            formatted = format_price_with_market_status(key, price, usd_price)
+            formatted = format_price_with_market_status(key, price)
             lines.append(f"{emoji} {name} : {formatted}")
         lines.append("")
     return "\n".join(lines) if lines else "هیچ نمادی انتخاب نشده است."
@@ -461,10 +476,9 @@ async def button_handler(update, context):
 async def status_single(update, symbol_key, name, emoji):
     chat_id = update.effective_chat.id
     price = get_price(symbol_key)
-    if price:
+    if price is not None:
         save_price(symbol_key, price)
-    usd_price = fetch_usd_price()
-    formatted = format_price_with_market_status(symbol_key, price, usd_price)
+    formatted = format_price_with_market_status(symbol_key, price)
     await send_message(chat_id, f"{emoji} **{name}**\n💰 {formatted}", parse_mode='Markdown')
 
 async def gold(update, context): await status_single(update, 'gold', 'GOLD', '🏆')
@@ -479,7 +493,8 @@ async def doge(update, context): await status_single(update, 'doge', 'DOGE', '�
 async def bch(update, context): await status_single(update, 'bch', 'BCH', '🔶')
 async def ltc(update, context): await status_single(update, 'ltc', 'LTC', '⚡')
 async def trx(update, context): await status_single(update, 'trx', 'TRX', '🔴')
-async def usdt(update, context): await status_single(update, 'usdt', 'USDT', '💵')
+async def usdt_rial(update, context): await status_single(update, 'usdt_rial', 'تتر (ریال)', '💰')
+async def aed(update, context): await status_single(update, 'aed', 'درهم امارات', '🇦🇪')
 async def oil(update, context): await status_single(update, 'oil', 'OIL', '🛢️')
 async def brent(update, context): await status_single(update, 'brent', 'BRENT', '🛢️')
 async def gas(update, context): await status_single(update, 'gas', 'GAS', '🔥')
@@ -499,7 +514,9 @@ async def help_command(update, context):
     await send_message(chat_id,
         "📋 **دستورات:**\n"
         "/start - منوی اصلی\n"
-        "/all - نمایش قیمت‌های انتخاب‌شده با فرمت جدید"
+        "/all - نمایش قیمت‌های انتخاب‌شده با فرمت جدید\n"
+        "/usdt_rial - قیمت تتر (ریال)\n"
+        "/aed - قیمت درهم امارات"
     )
 
 async def auto_send_loop():
@@ -545,7 +562,8 @@ def run_bot_in_main_thread():
     app.add_handler(CommandHandler("bch", bch))
     app.add_handler(CommandHandler("ltc", ltc))
     app.add_handler(CommandHandler("trx", trx))
-    app.add_handler(CommandHandler("usdt", usdt))
+    app.add_handler(CommandHandler("usdt_rial", usdt_rial))
+    app.add_handler(CommandHandler("aed", aed))
     app.add_handler(CommandHandler("oil", oil))
     app.add_handler(CommandHandler("brent", brent))
     app.add_handler(CommandHandler("gas", gas))
