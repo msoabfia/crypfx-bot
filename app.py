@@ -70,7 +70,7 @@ CATEGORIES = {
     }
 }
 
-# ======== دریافت نرخ دلار از Nobitex (بدون فیلتر) ========
+# ======== دریافت نرخ دلار از Nobitex ========
 def fetch_usd_price():
     try:
         resp = requests.get('https://api.nobitex.ir/market/stats?srcCurrency=usdt&dstCurrency=rls', timeout=10)
