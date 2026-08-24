@@ -25,7 +25,7 @@ TIMEOUT = 30
 
 logging.basicConfig(level=logging.ERROR)
 
-# ======== دسته‌بندی نمادها (با ترتیب جدید) ========
+# ======== دسته‌بندی نمادها ========
 CATEGORIES = {
     'crypto': {
         'name': 'ارزهای دیجیتال',
@@ -71,7 +71,7 @@ CATEGORIES = {
     }
 }
 
-# ======== دریافت قیمت دلار (فقط از tgju.org) ========
+# ======== دریافت قیمت دلار (از tgju.org) ========
 def fetch_usd_price():
     try:
         resp = requests.get('https://www.tgju.org/', timeout=10)
@@ -81,14 +81,24 @@ def fetch_usd_price():
             return int(price)
     except:
         pass
-    return 199900  # مقدار پیش‌فرض در صورت عدم دریافت
+    return 199900  # مقدار پیش‌فرض
 
-# ======== دریافت قیمت درهم (با نرخ 3.67) ========
+# ======== دریافت قیمت درهم (با نرخ واقعی) ========
 def fetch_aed_price():
     usd_price = fetch_usd_price()
-    if usd_price:
-        return int(usd_price * 3.67)  # نرخ تقریبی درهم به دلار
-    return None
+    if not usd_price:
+        return None
+    # دریافت نرخ درهم از API
+    try:
+        resp = requests.get('https://api.exchangerate-api.com/v4/latest/USD', timeout=10)
+        data = resp.json()
+        aed_rate = data['rates'].get('AED')
+        if aed_rate:
+            return int(usd_price / aed_rate)
+    except:
+        pass
+    # نرخ تقریبی ۳.۶۷
+    return int(usd_price / 3.67)
 
 # ======== دریافت قیمت ========
 def fetch_yahoo(symbol):
@@ -158,13 +168,6 @@ def get_price(symbol_key):
     elif symbol_key == 'sugar':
         price = fetch_yahoo('SB=F')
         return round(price / 100, 4) if price else None
-    return None
-
-def get_price_change(symbol_key, current_price):
-    old_price = get_last_price(symbol_key)
-    if old_price and old_price > 0 and current_price:
-        change = ((current_price - old_price) / old_price) * 100
-        return change
     return None
 
 def is_market_open(symbol_key):
@@ -272,8 +275,6 @@ async def send_message(chat_id, text, parse_mode='Markdown', reply_markup=None):
 def format_price(price, symbol_key):
     if price is None:
         return "⛔ در دسترس نیست"
-    
-    # تتر و درهم به تومان
     if symbol_key == 'usdt':
         usd_price = fetch_usd_price()
         if usd_price:
@@ -281,8 +282,7 @@ def format_price(price, symbol_key):
         return f"{price:.4f} دلار"
     elif symbol_key == 'aed':
         return f"{price:,.0f} تومان"
-    
-    # بقیه به دلار (بدون واحد)
+    # بقیه بدون واحد
     if price < 0.001:
         return f"{price:.4e}"
     elif price < 1:
@@ -304,6 +304,14 @@ def format_change(change):
     else:
         return f"📉 {change:+.2f}%"
 
+def get_price_with_old(symbol_key):
+    """دریافت قیمت جدید و قیمت قبلی (برای محاسبه تغییر)"""
+    old_price = get_last_price(symbol_key)
+    new_price = get_price(symbol_key)
+    if new_price is not None:
+        save_price(symbol_key, new_price)
+    return new_price, old_price
+
 def generate_price_message(selections):
     lines = []
     for cat_key, cat in CATEGORIES.items():
@@ -312,11 +320,11 @@ def generate_price_message(selections):
             continue
         lines.append(f"{cat['emoji']} {cat['name']}:")
         for key, name, emoji in cat_selected:
-            price = get_price(key)
-            if price:
-                save_price(key, price)  # ذخیره قیمت جدید قبل از محاسبه تغییرات
-            formatted = format_price(price, key)
-            change = get_price_change(key, price)
+            new_price, old_price = get_price_with_old(key)
+            formatted = format_price(new_price, key)
+            change = None
+            if old_price and old_price > 0 and new_price:
+                change = ((new_price - old_price) / old_price) * 100
             change_text = format_change(change)
             if change_text:
                 lines.append(f"{emoji} {name} : {formatted} {change_text}")
@@ -459,13 +467,14 @@ async def button_handler(update, context):
 
 async def status_single(update, symbol_key, name, emoji):
     chat_id = update.effective_chat.id
-    new_price = get_price(symbol_key)
-    if not new_price:
+    new_price, old_price = get_price_with_old(symbol_key)
+    if new_price is None:
         await send_message(chat_id, f"{emoji} {name}: ⛔ در دسترس نیست.")
         return
-    save_price(symbol_key, new_price)
     formatted = format_price(new_price, symbol_key)
-    change = get_price_change(symbol_key, new_price)
+    change = None
+    if old_price and old_price > 0:
+        change = ((new_price - old_price) / old_price) * 100
     change_text = format_change(change)
     if change_text:
         await send_message(chat_id, f"{emoji} **{name}**\n💰 {formatted}\n{change_text}", parse_mode='Markdown')
