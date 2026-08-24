@@ -77,22 +77,14 @@ CATEGORIES = {
     }
 }
 
-# ======== دریافت قیمت تتر ========
+# ======== دریافت قیمت تتر (با استفاده از API نوبیتکس و fallback) ========
 def fetch_usdt_price():
-    # منبع اول: ارزدیجیتال
+    # منبع اول: نوبیتکس (با هدرهای مرورگر)
     try:
-        resp = requests.get('https://arzdigital.com/price/usdt/', timeout=8)
-        if resp.status_code == 200:
-            match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
-            if match:
-                price = match.group(1).replace(',', '')
-                return int(price)
-    except:
-        pass
-    
-    # منبع دوم: نوبیتکس
-    try:
-        resp = requests.get('https://api.nobitex.ir/market/stats?srcCurrency=usdt&dstCurrency=rls', timeout=8)
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
+        }
+        resp = requests.get('https://api.nobitex.ir/market/stats?srcCurrency=usdt&dstCurrency=rls', headers=headers, timeout=8)
         data = resp.json()
         if data.get('stats') and 'USDT-IRT' in data['stats']:
             price = data['stats']['USDT-IRT'].get('bestSell')
@@ -101,13 +93,25 @@ def fetch_usdt_price():
     except:
         pass
     
-    # منبع سوم: tgju.org
+    # منبع دوم: tgju.org (با regex دقیق‌تر)
     try:
         resp = requests.get('https://www.tgju.org/', timeout=8)
+        # الگوی جدید برای قیمت دلار (با کلاس‌های متفاوت)
         match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
         if match:
             price = match.group(1).replace(',', '')
             return int(price)
+    except:
+        pass
+    
+    # منبع سوم: ارزدیجیتال
+    try:
+        resp = requests.get('https://arzdigital.com/price/usdt/', timeout=8)
+        if resp.status_code == 200:
+            match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
+            if match:
+                price = match.group(1).replace(',', '')
+                return int(price)
     except:
         pass
     
@@ -127,14 +131,17 @@ def fetch_aed_price():
         pass
     
     # منبع دوم: tgju.org (محاسبه از دلار)
+    usd_price = None
     try:
         resp = requests.get('https://www.tgju.org/', timeout=8)
         match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
         if match:
             usd_price = int(match.group(1).replace(',', ''))
-            return int(usd_price / 3.67)
     except:
         pass
+    
+    if usd_price:
+        return int(usd_price / 3.67)
     
     return None
 
@@ -209,9 +216,10 @@ def get_price(symbol_key):
 def is_market_open(symbol_key):
     now = datetime.now()
     today = now.weekday()
+    # رمزارزها و واحدهای پولی همیشه باز هستند
     if symbol_key in ['btc', 'eth', 'bnb', 'gram', 'xrp', 'sol', 'doge', 'bch', 'ltc', 'trx', 'dot', 'usdt', 'aed']:
         return True
-    if today == 6:
+    if today == 6:  # یکشنبه
         return False
     if symbol_key == 'sugar':
         iran_hour = (now.hour + 3) % 24
