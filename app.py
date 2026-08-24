@@ -74,86 +74,8 @@ CATEGORIES = {
     }
 }
 
-# ======== دیتابیس ========
-DB_PATH = "market_data.db"
-
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS prices
-                 (symbol TEXT, timestamp TEXT, price REAL, PRIMARY KEY (symbol, timestamp))''')
-    c.execute('''CREATE TABLE IF NOT EXISTS history
-                 (symbol TEXT, timestamp TEXT, price REAL)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS user_selections
-                 (user_id INTEGER, symbol TEXT, PRIMARY KEY (user_id, symbol))''')
-    conn.commit()
-    conn.close()
-
-def save_price(symbol, price):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('INSERT INTO prices (symbol, timestamp, price) VALUES (?, ?, ?)',
-              (symbol, datetime.now().isoformat(), price))
-    conn.commit()
-    conn.close()
-
-def get_last_price(symbol):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT price FROM prices WHERE symbol=? ORDER BY timestamp DESC LIMIT 1', (symbol,))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else None
-
-def get_user_selections(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT symbol FROM user_selections WHERE user_id=?', (user_id,))
-    rows = c.fetchall()
-    conn.close()
-    return [row[0] for row in rows]
-
-def save_user_selection(user_id, symbol):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('INSERT OR IGNORE INTO user_selections (user_id, symbol) VALUES (?, ?)', (user_id, symbol))
-    conn.commit()
-    conn.close()
-
-def remove_user_selection(user_id, symbol):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('DELETE FROM user_selections WHERE user_id=? AND symbol=?', (user_id, symbol))
-    conn.commit()
-    conn.close()
-
-def clear_user_selections(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('DELETE FROM user_selections WHERE user_id=?', (user_id,))
-    conn.commit()
-    conn.close()
-
-def select_all_symbols(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('DELETE FROM user_selections WHERE user_id=?', (user_id,))
-    for category in CATEGORIES.values():
-        for key, _, _ in category['symbols']:
-            c.execute('INSERT OR IGNORE INTO user_selections (user_id, symbol) VALUES (?, ?)', (user_id, key))
-    conn.commit()
-    conn.close()
-
-# ======== دریافت قیمت ========
 def fetch_usdt_price():
-    try:
-        resp = requests.get('https://arzdigital.com/price/usdt/', timeout=8)
-        if resp.status_code == 200:
-            match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
-            if match:
-                return int(match.group(1).replace(',', ''))
-    except:
-        pass
+    # 1. Nobitex API (معتبرترین منبع)
     try:
         resp = requests.get('https://api.nobitex.ir/market/stats?srcCurrency=usdt&dstCurrency=rls', timeout=8)
         data = resp.json()
@@ -163,48 +85,72 @@ def fetch_usdt_price():
                 return int(float(price))
     except:
         pass
-    try:
-        resp = requests.get('https://www.tgju.org/', timeout=8)
-        match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
-        if match:
-            return int(match.group(1).replace(',', ''))
-    except:
-        pass
-    try:
-        resp = requests.get('https://bonbast.com/', timeout=8)
-        if resp.status_code == 200:
-            match = re.search(r'<td class="ltr">([\d,]+)</td>', resp.text)
-            if match:
-                return int(match.group(1).replace(',', ''))
-    except:
-        pass
-    return None
 
-def fetch_aed_price():
+    # 2. ArzDigital (با impersonate)
     try:
-        resp = requests.get('https://arzdigital.com/price/aed/', timeout=8)
+        resp = cffi_requests.get('https://arzdigital.com/price/usdt/', impersonate="chrome120", timeout=8)
         if resp.status_code == 200:
             match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
             if match:
                 return int(match.group(1).replace(',', ''))
     except:
         pass
+
+    # 3. Bonbast
     try:
-        resp = requests.get('https://bonbast.com/', timeout=8)
+        resp = cffi_requests.get('https://bonbast.com/', impersonate="chrome120", timeout=8)
         if resp.status_code == 200:
             match = re.search(r'<td class="ltr">([\d,]+)</td>', resp.text)
             if match:
                 return int(match.group(1).replace(',', ''))
     except:
         pass
+
+    # 4. دریافت قیمت دلار از tgju و استفاده به‌عنوان تتر (پشتیبان)
     try:
-        resp = requests.get('https://www.tgju.org/', timeout=8)
-        match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
-        if match:
-            usd = int(match.group(1).replace(',', ''))
-            return int(usd / 3.67)
+        resp = cffi_requests.get('https://www.tgju.org/', impersonate="chrome120", timeout=8)
+        if resp.status_code == 200:
+            match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
+            if match:
+                usd_price = int(match.group(1).replace(',', ''))
+                return usd_price  # تقریباً برابر تتر
     except:
         pass
+
+    return None
+
+def fetch_aed_price():
+    # 1. ArzDigital
+    try:
+        resp = cffi_requests.get('https://arzdigital.com/price/aed/', impersonate="chrome120", timeout=8)
+        if resp.status_code == 200:
+            match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
+            if match:
+                return int(match.group(1).replace(',', ''))
+    except:
+        pass
+
+    # 2. Bonbast
+    try:
+        resp = cffi_requests.get('https://bonbast.com/', impersonate="chrome120", timeout=8)
+        if resp.status_code == 200:
+            match = re.search(r'<td class="ltr">([\d,]+)</td>', resp.text)
+            if match:
+                return int(match.group(1).replace(',', ''))
+    except:
+        pass
+
+    # 3. دریافت قیمت دلار از tgju و تقسیم بر 3.67 (نرخ ثابت)
+    try:
+        resp = cffi_requests.get('https://www.tgju.org/', impersonate="chrome120", timeout=8)
+        if resp.status_code == 200:
+            match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
+            if match:
+                usd_price = int(match.group(1).replace(',', ''))
+                return int(usd_price / 3.67)
+    except:
+        pass
+
     return None
 
 def fetch_yahoo(symbol):
@@ -288,7 +234,75 @@ def is_market_open(symbol_key):
         return False
     return True
 
-# ======== توابع ربات ========
+DB_PATH = "market_data.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS prices
+                 (symbol TEXT, timestamp TEXT, price REAL, PRIMARY KEY (symbol, timestamp))''')
+    c.execute('''CREATE TABLE IF NOT EXISTS history
+                 (symbol TEXT, timestamp TEXT, price REAL)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS user_selections
+                 (user_id INTEGER, symbol TEXT, PRIMARY KEY (user_id, symbol))''')
+    conn.commit()
+    conn.close()
+
+def save_price(symbol, price):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('INSERT INTO prices (symbol, timestamp, price) VALUES (?, ?, ?)',
+              (symbol, datetime.now().isoformat(), price))
+    conn.commit()
+    conn.close()
+
+def get_last_price(symbol):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT price FROM prices WHERE symbol=? ORDER BY timestamp DESC LIMIT 1', (symbol,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def get_user_selections(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT symbol FROM user_selections WHERE user_id=?', (user_id,))
+    rows = c.fetchall()
+    conn.close()
+    return [row[0] for row in rows]
+
+def save_user_selection(user_id, symbol):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('INSERT OR IGNORE INTO user_selections (user_id, symbol) VALUES (?, ?)', (user_id, symbol))
+    conn.commit()
+    conn.close()
+
+def remove_user_selection(user_id, symbol):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('DELETE FROM user_selections WHERE user_id=? AND symbol=?', (user_id, symbol))
+    conn.commit()
+    conn.close()
+
+def clear_user_selections(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('DELETE FROM user_selections WHERE user_id=?', (user_id,))
+    conn.commit()
+    conn.close()
+
+def select_all_symbols(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('DELETE FROM user_selections WHERE user_id=?', (user_id,))
+    for category in CATEGORIES.values():
+        for key, _, _ in category['symbols']:
+            c.execute('INSERT OR IGNORE INTO user_selections (user_id, symbol) VALUES (?, ?)', (user_id, key))
+    conn.commit()
+    conn.close()
+
 sending_active = {}
 last_sent_summary = {}
 
