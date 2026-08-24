@@ -1,5 +1,4 @@
 import os
-os.environ['TZ'] = 'UTC'
 import asyncio
 import time
 import sqlite3
@@ -10,7 +9,6 @@ from curl_cffi import requests as cffi_requests
 from flask import Flask
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
-from telegram.error import TimedOut, NetworkError
 import logging
 import threading
 
@@ -77,14 +75,21 @@ CATEGORIES = {
     }
 }
 
-# ======== دریافت قیمت تتر (با استفاده از API نوبیتکس و fallback) ========
+# ======== دریافت قیمت تتر ========
 def fetch_usdt_price():
-    # منبع اول: نوبیتکس (با هدرهای مرورگر)
+    # منبع ۱: ارزدیجیتال
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
-        }
-        resp = requests.get('https://api.nobitex.ir/market/stats?srcCurrency=usdt&dstCurrency=rls', headers=headers, timeout=8)
+        resp = requests.get('https://arzdigital.com/price/usdt/', timeout=8)
+        if resp.status_code == 200:
+            match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
+            if match:
+                return int(match.group(1).replace(',', ''))
+    except:
+        pass
+    
+    # منبع ۲: نوبیتکس
+    try:
+        resp = requests.get('https://api.nobitex.ir/market/stats?srcCurrency=usdt&dstCurrency=rls', timeout=8)
         data = resp.json()
         if data.get('stats') and 'USDT-IRT' in data['stats']:
             price = data['stats']['USDT-IRT'].get('bestSell')
@@ -93,25 +98,22 @@ def fetch_usdt_price():
     except:
         pass
     
-    # منبع دوم: tgju.org (با regex دقیق‌تر)
+    # منبع ۳: tgju.org
     try:
         resp = requests.get('https://www.tgju.org/', timeout=8)
-        # الگوی جدید برای قیمت دلار (با کلاس‌های متفاوت)
         match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
         if match:
-            price = match.group(1).replace(',', '')
-            return int(price)
+            return int(match.group(1).replace(',', ''))
     except:
         pass
     
-    # منبع سوم: ارزدیجیتال
+    # منبع ۴: bonbast.com
     try:
-        resp = requests.get('https://arzdigital.com/price/usdt/', timeout=8)
+        resp = requests.get('https://bonbast.com/', timeout=8)
         if resp.status_code == 200:
-            match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
+            match = re.search(r'<td class="ltr">([\d,]+)</td>', resp.text)
             if match:
-                price = match.group(1).replace(',', '')
-                return int(price)
+                return int(match.group(1).replace(',', ''))
     except:
         pass
     
@@ -119,29 +121,35 @@ def fetch_usdt_price():
 
 # ======== دریافت قیمت درهم ========
 def fetch_aed_price():
-    # منبع اول: ارزدیجیتال
+    # منبع ۱: ارزدیجیتال
     try:
         resp = requests.get('https://arzdigital.com/price/aed/', timeout=8)
         if resp.status_code == 200:
             match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
             if match:
-                price = match.group(1).replace(',', '')
-                return int(price)
+                return int(match.group(1).replace(',', ''))
     except:
         pass
     
-    # منبع دوم: tgju.org (محاسبه از دلار)
-    usd_price = None
+    # منبع ۲: bonbast.com
+    try:
+        resp = requests.get('https://bonbast.com/', timeout=8)
+        if resp.status_code == 200:
+            match = re.search(r'<td class="ltr">([\d,]+)</td>', resp.text)
+            if match:
+                return int(match.group(1).replace(',', ''))
+    except:
+        pass
+    
+    # منبع ۳: محاسبه از tgju
     try:
         resp = requests.get('https://www.tgju.org/', timeout=8)
         match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
         if match:
-            usd_price = int(match.group(1).replace(',', ''))
+            usd = int(match.group(1).replace(',', ''))
+            return int(usd / 3.67)
     except:
         pass
-    
-    if usd_price:
-        return int(usd_price / 3.67)
     
     return None
 
@@ -167,11 +175,9 @@ def get_price(symbol_key):
     elif symbol_key == 'aed':
         return fetch_aed_price()
     elif symbol_key == 'gram':
-        # اول یاهو با فیلتر (فقط اعداد بالای 1 دلار قبول هستند)
         price = fetch_yahoo('TON-USD')
         if price and price > 1:
             return price
-        # اگر یاهو جواب نداد یا عدد اشتباه بود، از CoinGecko استفاده کن
         try:
             resp = requests.get('https://api.coingecko.com/api/v3/simple/price?ids=the-open-network&vs_currencies=usd', timeout=8)
             data = resp.json()
@@ -216,10 +222,9 @@ def get_price(symbol_key):
 def is_market_open(symbol_key):
     now = datetime.now()
     today = now.weekday()
-    # رمزارزها و واحدهای پولی همیشه باز هستند
     if symbol_key in ['btc', 'eth', 'bnb', 'gram', 'xrp', 'sol', 'doge', 'bch', 'ltc', 'trx', 'dot', 'usdt', 'aed']:
         return True
-    if today == 6:  # یکشنبه
+    if today == 6:
         return False
     if symbol_key == 'sugar':
         iran_hour = (now.hour + 3) % 24
@@ -262,45 +267,6 @@ def get_last_price(symbol):
     row = c.fetchone()
     conn.close()
     return row[0] if row else None
-
-def get_user_selections(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT symbol FROM user_selections WHERE user_id=?', (user_id,))
-    rows = c.fetchall()
-    conn.close()
-    return [row[0] for row in rows]
-
-def save_user_selection(user_id, symbol):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('INSERT OR IGNORE INTO user_selections (user_id, symbol) VALUES (?, ?)', (user_id, symbol))
-    conn.commit()
-    conn.close()
-
-def remove_user_selection(user_id, symbol):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('DELETE FROM user_selections WHERE user_id=? AND symbol=?', (user_id, symbol))
-    conn.commit()
-    conn.close()
-
-def clear_user_selections(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('DELETE FROM user_selections WHERE user_id=?', (user_id,))
-    conn.commit()
-    conn.close()
-
-def select_all_symbols(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('DELETE FROM user_selections WHERE user_id=?', (user_id,))
-    for category in CATEGORIES.values():
-        for key, _, _ in category['symbols']:
-            c.execute('INSERT OR IGNORE INTO user_selections (user_id, symbol) VALUES (?, ?)', (user_id, key))
-    conn.commit()
-    conn.close()
 
 # ======== توابع ربات ========
 sending_active = {}
@@ -579,6 +545,18 @@ async def help_command(update, context):
         "/aed - قیمت درهم امارات"
     )
 
+# ======== Flask ========
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def home():
+    return "✅ ربات در حال اجراست!"
+
+@flask_app.route('/health')
+def health():
+    return "OK"
+
+# ======== حلقه خودکار ========
 async def auto_send_loop():
     bot = Bot(token=TELEGRAM_TOKEN)
     while True:
@@ -633,16 +611,6 @@ def run_bot_in_main_thread():
     app.add_handler(CallbackQueryHandler(button_handler))
     print("🤖 ربات در حال اجرا...")
     app.run_polling()
-
-flask_app = Flask(__name__)
-
-@flask_app.route('/')
-def home():
-    return "✅ ربات در حال اجراست!"
-
-@flask_app.route('/health')
-def health():
-    return "OK"
 
 def run_flask():
     port = int(os.environ.get('PORT', 10000))
