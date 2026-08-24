@@ -77,40 +77,48 @@ CATEGORIES = {
     }
 }
 
-# ======== دریافت قیمت دلار از tgju.org ========
-def fetch_usd_price():
+# ======== دریافت قیمت تتر و درهم از tgju.org ========
+def fetch_tgju_prices():
+    """دریافت قیمت تتر و درهم از tgju.org"""
     try:
-        resp = requests.get('https://www.tgju.org/', timeout=10)
-        match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
-        if match:
-            price = match.group(1).replace(',', '')
-            return int(price)
-    except:
-        pass
-    return 199900
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
+        }
+        resp = requests.get('https://www.tgju.org/', headers=headers, timeout=15)
+        html = resp.text
+        
+        # استخراج قیمت تتر (USDT)
+        usdt_match = re.search(r'<span[^>]*id="usdt-price"[^>]*>([\d,]+)</span>', html)
+        if not usdt_match:
+            usdt_match = re.search(r'USDT[^>]*>([\d,]+)</span>', html)
+        
+        # استخراج قیمت درهم (AED)
+        aed_match = re.search(r'<span[^>]*id="aed-price"[^>]*>([\d,]+)</span>', html)
+        if not aed_match:
+            aed_match = re.search(r'درهم[^>]*>([\d,]+)</span>', html)
+        
+        usdt_price = None
+        aed_price = None
+        
+        if usdt_match:
+            usdt_price = int(usdt_match.group(1).replace(',', ''))
+        if aed_match:
+            aed_price = int(aed_match.group(1).replace(',', ''))
+            
+        return usdt_price, aed_price
+    except Exception as e:
+        print(f"⚠️ خطا در دریافت از tgju.org: {e}")
+        return None, None
 
 # ======== دریافت قیمت تتر ========
 def fetch_usdt_price():
-    usd_price = fetch_usd_price()
-    if not usd_price:
-        return None
-    usdt_usd = fetch_twelve('USDT/USD') or fetch_coingecko('tether') or 1.0
-    return int(usdt_usd * usd_price)
+    usdt, _ = fetch_tgju_prices()
+    return usdt
 
 # ======== دریافت قیمت درهم ========
 def fetch_aed_price():
-    usd_price = fetch_usd_price()
-    if not usd_price:
-        return None
-    try:
-        resp = requests.get('https://api.exchangerate-api.com/v4/latest/USD', timeout=10)
-        data = resp.json()
-        aed_rate = data['rates'].get('AED')
-        if aed_rate:
-            return int(usd_price / aed_rate)
-    except:
-        pass
-    return int(usd_price / 3.67)
+    _, aed = fetch_tgju_prices()
+    return aed
 
 # ======== دریافت قیمت از یاهو ========
 def fetch_yahoo(symbol):
@@ -144,6 +152,7 @@ def fetch_coingecko(symbol):
     except:
         return None
 
+# ======== دریافت قیمت اصلی ========
 def get_price(symbol_key):
     if not is_market_open(symbol_key):
         return None
@@ -470,7 +479,7 @@ async def button_handler(update, context):
             return
         sending_active[user_id] = True
         last_sent_summary[user_id] = ""
-        await query.edit_message_text("🚀 **ارسال خودکار شروع شد!**\nهر １ دقیقه قیمت‌های انتخاب‌شده ارسال می‌شود.", parse_mode='Markdown')
+        await query.edit_message_text("🚀 **ارسال خودکار شروع شد!**\nهر ۱ دقیقه قیمت‌های انتخاب‌شده ارسال می‌شود.", parse_mode='Markdown')
         return
     if data == "stop_sending":
         sending_active[user_id] = False
@@ -561,13 +570,14 @@ async def help_command(update, context):
 async def send_startup_message():
     try:
         bot = Bot(token=TELEGRAM_TOKEN)
-        await asyncio.sleep(5)
+        await asyncio.sleep(3)
         await bot.send_message(
             chat_id=CHAT_ID,
             text="✅ **ربات با موفقیت به‌روزرسانی شد!**\n"
                  "📊 قیمت‌ها از منابع جدید دریافت می‌شوند:\n"
-                 "💵 **تتر**: از tgju.org + TwelveData\n"
-                 "🔷 **GRAM**: فقط از یاهو فایننس\n"
+                 "💵 **تتر**: از tgju.org (قیمت بازار آزاد ایران)\n"
+                 "🇦🇪 **درهم**: از tgju.org\n"
+                 "🔷 **GRAM**: فقط از یاهو فایننس (قیمت دقیق ~1.48 دلار)\n"
                  "⏱️ هر ۱ دقیقه به‌روزرسانی خودکار",
             parse_mode='Markdown',
             reply_markup=get_simple_keyboard()
@@ -576,52 +586,6 @@ async def send_startup_message():
     except Exception as e:
         print(f"⚠️ خطا در ارسال پیام به‌روزرسانی: {e}")
 
-# ======== اجرای ربات (در ترد اصلی) ========
-def run_bot_in_main_thread():
-    app = Application.builder().token(TELEGRAM_TOKEN).connect_timeout(TIMEOUT).read_timeout(TIMEOUT).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("gold", gold))
-    app.add_handler(CommandHandler("silver", silver))
-    app.add_handler(CommandHandler("btc", btc))
-    app.add_handler(CommandHandler("eth", eth))
-    app.add_handler(CommandHandler("bnb", bnb))
-    app.add_handler(CommandHandler("gram", gram))
-    app.add_handler(CommandHandler("xrp", xrp))
-    app.add_handler(CommandHandler("sol", sol))
-    app.add_handler(CommandHandler("doge", doge))
-    app.add_handler(CommandHandler("bch", bch))
-    app.add_handler(CommandHandler("ltc", ltc))
-    app.add_handler(CommandHandler("trx", trx))
-    app.add_handler(CommandHandler("usdt", usdt))
-    app.add_handler(CommandHandler("aed", aed))
-    app.add_handler(CommandHandler("oil", oil))
-    app.add_handler(CommandHandler("brent", brent))
-    app.add_handler(CommandHandler("gas", gas))
-    app.add_handler(CommandHandler("sugar", sugar))
-    app.add_handler(CommandHandler("all", all_status))
-    app.add_handler(CommandHandler("status", status_cmd))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    print("🤖 ربات در حال اجرا (Main Thread)...")
-    # حذف signal_handlers=False
-    app.run_polling()
-
-# ======== اجرای Flask در ترد جداگانه ========
-def run_flask():
-    flask_app = Flask(__name__)
-
-    @flask_app.route('/')
-    def home():
-        return "✅ ربات در حال اجراست!"
-
-    @flask_app.route('/health')
-    def health():
-        return "OK"
-
-    port = int(os.environ.get('PORT', 10000))
-    flask_app.run(host='0.0.0.0', port=port)
-
-# ======== حلقه خودکار ========
 async def auto_send_loop():
     bot = Bot(token=TELEGRAM_TOKEN)
     while True:
@@ -649,18 +613,61 @@ async def auto_send_loop():
 def start_auto_send():
     asyncio.run(auto_send_loop())
 
-# ======== اجرای اصلی ========
+def run_bot_in_main_thread():
+    app = Application.builder().token(TELEGRAM_TOKEN).connect_timeout(TIMEOUT).read_timeout(TIMEOUT).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("gold", gold))
+    app.add_handler(CommandHandler("silver", silver))
+    app.add_handler(CommandHandler("btc", btc))
+    app.add_handler(CommandHandler("eth", eth))
+    app.add_handler(CommandHandler("bnb", bnb))
+    app.add_handler(CommandHandler("gram", gram))
+    app.add_handler(CommandHandler("xrp", xrp))
+    app.add_handler(CommandHandler("sol", sol))
+    app.add_handler(CommandHandler("doge", doge))
+    app.add_handler(CommandHandler("bch", bch))
+    app.add_handler(CommandHandler("ltc", ltc))
+    app.add_handler(CommandHandler("trx", trx))
+    app.add_handler(CommandHandler("usdt", usdt))
+    app.add_handler(CommandHandler("aed", aed))
+    app.add_handler(CommandHandler("oil", oil))
+    app.add_handler(CommandHandler("brent", brent))
+    app.add_handler(CommandHandler("gas", gas))
+    app.add_handler(CommandHandler("sugar", sugar))
+    app.add_handler(CommandHandler("all", all_status))
+    app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    print("🤖 ربات در حال اجرا...")
+    app.run_polling()
+
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def home():
+    return "✅ ربات در حال اجراست!"
+
+@flask_app.route('/health')
+def health():
+    return "OK"
+
+def run_flask():
+    port = int(os.environ.get('PORT', 10000))
+    flask_app.run(host='0.0.0.0', port=port)
+
 if __name__ == '__main__':
     init_db()
 
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    print("✅ Flask در ترد جداگانه اجرا شد.")
 
     auto_thread = threading.Thread(target=start_auto_send, daemon=True)
     auto_thread.start()
-    print("✅ حلقه خودکار در ترد جداگانه اجرا شد.")
+
+    bot_thread = threading.Thread(target=run_bot_in_main_thread, daemon=True)
+    bot_thread.start()
 
     asyncio.run(send_startup_message())
 
-    run_bot_in_main_thread()
+    while True:
+        time.sleep(1)
