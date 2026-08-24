@@ -79,43 +79,29 @@ CATEGORIES = {
 
 # ======== دریافت قیمت تتر و درهم از tgju.org ========
 def fetch_tgju_prices():
-    """دریافت قیمت تتر و درهم از tgju.org"""
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
         }
         resp = requests.get('https://www.tgju.org/', headers=headers, timeout=15)
         html = resp.text
-        
-        # استخراج قیمت تتر (USDT)
         usdt_match = re.search(r'<span[^>]*id="usdt-price"[^>]*>([\d,]+)</span>', html)
         if not usdt_match:
             usdt_match = re.search(r'USDT[^>]*>([\d,]+)</span>', html)
-        
-        # استخراج قیمت درهم (AED)
         aed_match = re.search(r'<span[^>]*id="aed-price"[^>]*>([\d,]+)</span>', html)
         if not aed_match:
             aed_match = re.search(r'درهم[^>]*>([\d,]+)</span>', html)
-        
-        usdt_price = None
-        aed_price = None
-        
-        if usdt_match:
-            usdt_price = int(usdt_match.group(1).replace(',', ''))
-        if aed_match:
-            aed_price = int(aed_match.group(1).replace(',', ''))
-            
+        usdt_price = int(usdt_match.group(1).replace(',', '')) if usdt_match else None
+        aed_price = int(aed_match.group(1).replace(',', '')) if aed_match else None
         return usdt_price, aed_price
     except Exception as e:
         print(f"⚠️ خطا در دریافت از tgju.org: {e}")
         return None, None
 
-# ======== دریافت قیمت تتر ========
 def fetch_usdt_price():
     usdt, _ = fetch_tgju_prices()
     return usdt
 
-# ======== دریافت قیمت درهم ========
 def fetch_aed_price():
     _, aed = fetch_tgju_prices()
     return aed
@@ -566,7 +552,7 @@ async def help_command(update, context):
         "/aed - قیمت درهم امارات"
     )
 
-# ======== ارسال پیام به‌روزرسانی ========
+# ======== ارسال پیام به‌روزرسانی با دکمه ========
 async def send_startup_message():
     try:
         bot = Bot(token=TELEGRAM_TOKEN)
