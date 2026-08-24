@@ -89,7 +89,7 @@ def fetch_usd_price():
         pass
     return 199900
 
-# ======== دریافت قیمت تتر (از TwelveData یا CoinGecko + نرخ دلار) ========
+# ======== دریافت قیمت تتر ========
 def fetch_usdt_price():
     usd_price = fetch_usd_price()
     if not usd_price:
@@ -558,11 +558,11 @@ async def help_command(update, context):
         "/aed - قیمت درهم امارات"
     )
 
-# ======== ارسال پیام به‌روزرسانی با دکمه ========
+# ======== ارسال پیام به‌روزرسانی ========
 async def send_startup_message():
     try:
         bot = Bot(token=TELEGRAM_TOKEN)
-        await asyncio.sleep(3)
+        await asyncio.sleep(5)  # صبر بیشتر برای اطمینان از اتصال
         await bot.send_message(
             chat_id=CHAT_ID,
             text="✅ **ربات با موفقیت به‌روزرسانی شد!**\n"
@@ -577,6 +577,53 @@ async def send_startup_message():
     except Exception as e:
         print(f"⚠️ خطا در ارسال پیام به‌روزرسانی: {e}")
 
+# ======== اجرای ربات (در ترد اصلی) ========
+def run_bot_in_main_thread():
+    """اجرای ربات در ترد اصلی با signal_handlers=False"""
+    app = Application.builder().token(TELEGRAM_TOKEN).connect_timeout(TIMEOUT).read_timeout(TIMEOUT).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("gold", gold))
+    app.add_handler(CommandHandler("silver", silver))
+    app.add_handler(CommandHandler("btc", btc))
+    app.add_handler(CommandHandler("eth", eth))
+    app.add_handler(CommandHandler("bnb", bnb))
+    app.add_handler(CommandHandler("gram", gram))
+    app.add_handler(CommandHandler("xrp", xrp))
+    app.add_handler(CommandHandler("sol", sol))
+    app.add_handler(CommandHandler("doge", doge))
+    app.add_handler(CommandHandler("bch", bch))
+    app.add_handler(CommandHandler("ltc", ltc))
+    app.add_handler(CommandHandler("trx", trx))
+    app.add_handler(CommandHandler("usdt", usdt))
+    app.add_handler(CommandHandler("aed", aed))
+    app.add_handler(CommandHandler("oil", oil))
+    app.add_handler(CommandHandler("brent", brent))
+    app.add_handler(CommandHandler("gas", gas))
+    app.add_handler(CommandHandler("sugar", sugar))
+    app.add_handler(CommandHandler("all", all_status))
+    app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    print("🤖 ربات در حال اجرا (Main Thread)...")
+    # signal_handlers=False برای جلوگیری از خطای set_wakeup_fd
+    app.run_polling(signal_handlers=False)
+
+# ======== اجرای Flask در ترد جداگانه ========
+def run_flask():
+    flask_app = Flask(__name__)
+
+    @flask_app.route('/')
+    def home():
+        return "✅ ربات در حال اجراست!"
+
+    @flask_app.route('/health')
+    def health():
+        return "OK"
+
+    port = int(os.environ.get('PORT', 10000))
+    flask_app.run(host='0.0.0.0', port=port)
+
+# ======== حلقه خودکار ========
 async def auto_send_loop():
     bot = Bot(token=TELEGRAM_TOKEN)
     while True:
@@ -604,61 +651,20 @@ async def auto_send_loop():
 def start_auto_send():
     asyncio.run(auto_send_loop())
 
-def run_bot_in_main_thread():
-    app = Application.builder().token(TELEGRAM_TOKEN).connect_timeout(TIMEOUT).read_timeout(TIMEOUT).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("gold", gold))
-    app.add_handler(CommandHandler("silver", silver))
-    app.add_handler(CommandHandler("btc", btc))
-    app.add_handler(CommandHandler("eth", eth))
-    app.add_handler(CommandHandler("bnb", bnb))
-    app.add_handler(CommandHandler("gram", gram))
-    app.add_handler(CommandHandler("xrp", xrp))
-    app.add_handler(CommandHandler("sol", sol))
-    app.add_handler(CommandHandler("doge", doge))
-    app.add_handler(CommandHandler("bch", bch))
-    app.add_handler(CommandHandler("ltc", ltc))
-    app.add_handler(CommandHandler("trx", trx))
-    app.add_handler(CommandHandler("usdt", usdt))
-    app.add_handler(CommandHandler("aed", aed))
-    app.add_handler(CommandHandler("oil", oil))
-    app.add_handler(CommandHandler("brent", brent))
-    app.add_handler(CommandHandler("gas", gas))
-    app.add_handler(CommandHandler("sugar", sugar))
-    app.add_handler(CommandHandler("all", all_status))
-    app.add_handler(CommandHandler("status", status_cmd))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    print("🤖 ربات در حال اجرا...")
-    app.run_polling()
-
-flask_app = Flask(__name__)
-
-@flask_app.route('/')
-def home():
-    return "✅ ربات در حال اجراست!"
-
-@flask_app.route('/health')
-def health():
-    return "OK"
-
-def run_flask():
-    port = int(os.environ.get('PORT', 10000))
-    flask_app.run(host='0.0.0.0', port=port)
-
+# ======== اجرای اصلی ========
 if __name__ == '__main__':
     init_db()
 
+    # Flask را در یک ترد جداگانه اجرا کن
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
+    print("✅ Flask در ترد جداگانه اجرا شد.")
 
+    # حلقه خودکار را در یک ترد جداگانه اجرا کن
     auto_thread = threading.Thread(target=start_auto_send, daemon=True)
     auto_thread.start()
+    print("✅ حلقه خودکار در ترد جداگانه اجرا شد.")
 
-    bot_thread = threading.Thread(target=run_bot_in_main_thread, daemon=True)
-    bot_thread.start()
-
-    asyncio.run(send_startup_message())
-
-    while True:
-        time.sleep(1)
+    # ربات را در ترد اصلی اجرا کن (با signal_handlers=False)
+    # این کار از خطای set_wakeup_fd جلوگیری می‌کند
+    run_bot_in_main_thread()
