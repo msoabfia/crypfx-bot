@@ -77,12 +77,11 @@ CATEGORIES = {
     }
 }
 
-# ======== دریافت قیمت تتر از نوبیتکس (USDT/IRT) ========
+# ======== دریافت قیمت تتر از نوبیتکس (فقط نوبیتکس) ========
 def fetch_usdt_from_nobitex():
     try:
         resp = requests.get('https://api.nobitex.ir/market/stats?srcCurrency=usdt&dstCurrency=rls', timeout=10)
         data = resp.json()
-        # قیمت فروش (bestSell) یا قیمت آخر (lastPrice)
         price = data['stats']['USDT-IRT']['bestSell']
         if price:
             return int(float(price))
@@ -100,7 +99,7 @@ def fetch_usd_price():
             return int(price)
     except:
         pass
-    return 199900  # مقدار پیش‌فرض
+    return 199900
 
 # ======== دریافت قیمت درهم ========
 def fetch_aed_price():
@@ -156,16 +155,9 @@ def get_price(symbol_key):
         return None
 
     if symbol_key == 'usdt':
-        # اولویت با نوبیتکس
+        # فقط از نوبیتکس
         price = fetch_usdt_from_nobitex()
-        if price:
-            return price
-        # اگر نوبیتکس جواب نداد، از روش قبلی (TwelveData + دلار) استفاده کن
-        usd_price = fetch_usd_price()
-        if usd_price:
-            usd = fetch_twelve('USDT/USD') or fetch_coingecko('tether') or 1.0
-            return int(usd * usd_price)
-        return None
+        return price  # اگر None باشد، همان None برمی‌گردد
     elif symbol_key == 'aed':
         return fetch_aed_price()
     elif symbol_key == 'btc':
@@ -175,14 +167,14 @@ def get_price(symbol_key):
     elif symbol_key == 'bnb':
         return fetch_yahoo('BNB-USD') or fetch_twelve('BNB/USD')
     elif symbol_key == 'gram':
-        # اول یاهو، بعد TwelveData، بعد CoinGecko (با اولویت‌بندی جدید)
-        price = fetch_yahoo('TON-USD')
-        if price:
-            return price
+        # اول TwelveData، بعد CoinGecko، آخر یاهو (با اولویت‌بندی جدید)
         price = fetch_twelve('TON/USD')
         if price:
             return price
-        return fetch_coingecko('the-open-network')
+        price = fetch_coingecko('the-open-network')
+        if price:
+            return price
+        return fetch_yahoo('TON-USD')
     elif symbol_key == 'xrp':
         return fetch_yahoo('XRP-USD') or fetch_twelve('XRP/USD')
     elif symbol_key == 'sol':
@@ -213,10 +205,9 @@ def get_price(symbol_key):
 def is_market_open(symbol_key):
     now = datetime.now()
     today = now.weekday()
-    # ارزهای دیجیتال و واحدهای پولی ۲۴/۷
     if symbol_key in ['btc', 'eth', 'bnb', 'gram', 'xrp', 'sol', 'doge', 'bch', 'ltc', 'trx', 'dot', 'usdt', 'aed']:
         return True
-    if today == 6:  # یکشنبه
+    if today == 6:
         return False
     if symbol_key == 'sugar':
         iran_hour = (now.hour + 3) % 24
@@ -317,9 +308,7 @@ def format_price(price, symbol_key):
     if price is None:
         return "⛔ در دسترس نیست"
     if symbol_key in ['usdt', 'aed']:
-        # قیمت به تومان، فقط عدد با کاما
         return f"{price:,.0f}"
-    # بقیه به دلار
     if price < 0.001:
         return f"{price:.4e}"
     elif price < 1:
