@@ -25,13 +25,14 @@ TIMEOUT = 30
 
 logging.basicConfig(level=logging.ERROR)
 
-# ======== دسته‌بندی نمادها ========
+# ======== دسته‌بندی نمادها (با ترتیب جدید) ========
 CATEGORIES = {
     'crypto': {
         'name': 'ارزهای دیجیتال',
         'emoji': '💰',
         'symbols': [
             ('usdt', 'USDT', '💵'),
+            ('aed', 'AED', '🇦🇪'),  # درهم زیر تتر
             ('btc', 'BTC', '₿'),
             ('eth', 'ETH', '💎'),
             ('bnb', 'BNB', '🟡'),
@@ -42,7 +43,6 @@ CATEGORIES = {
             ('trx', 'TRX', '🔴'),
             ('doge', 'DOGE', '🐕'),
             ('gram', 'GRAM', '🔷'),
-            ('aed', 'درهم امارات', '🇦🇪'),
         ]
     },
     'metals': {
@@ -71,7 +71,7 @@ CATEGORIES = {
     }
 }
 
-# ======== دریافت قیمت دلار ========
+# ======== دریافت قیمت دلار (فقط از tgju.org) ========
 def fetch_usd_price():
     try:
         resp = requests.get('https://www.tgju.org/', timeout=10)
@@ -81,34 +81,14 @@ def fetch_usd_price():
             return int(price)
     except:
         pass
-    
-    try:
-        resp = requests.get('https://api.exchangerate-api.com/v4/latest/USD', timeout=10)
-        data = resp.json()
-        irr = data['rates'].get('IRR')
-        if irr:
-            return int(irr / 10)
-    except:
-        pass
-    
-    return None
+    return 199900  # مقدار پیش‌فرض در صورت عدم دریافت
 
-# ======== دریافت قیمت درهم ========
+# ======== دریافت قیمت درهم (با نرخ 3.67) ========
 def fetch_aed_price():
     usd_price = fetch_usd_price()
-    if not usd_price:
-        return None
-    
-    try:
-        resp = requests.get('https://api.exchangerate-api.com/v4/latest/USD', timeout=10)
-        data = resp.json()
-        aed_to_usd = data['rates'].get('AED')
-        if aed_to_usd:
-            return int(usd_price * aed_to_usd)
-    except:
-        pass
-    
-    return int(usd_price * 3.67)
+    if usd_price:
+        return int(usd_price * 3.67)  # نرخ تقریبی درهم به دلار
+    return None
 
 # ======== دریافت قیمت ========
 def fetch_yahoo(symbol):
@@ -289,19 +269,20 @@ async def send_message(chat_id, text, parse_mode='Markdown', reply_markup=None):
     bot = Bot(token=TELEGRAM_TOKEN)
     await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, reply_markup=reply_markup)
 
-def format_price(price, symbol_key, usd_price=None):
+def format_price(price, symbol_key):
     if price is None:
         return "⛔ در دسترس نیست"
     
-    if symbol_key in ['usdt', 'aed']:
-        if symbol_key == 'usdt':
-            usd_price = fetch_usd_price()
-            if usd_price:
-                return f"{price * usd_price:,.0f} تومان"
-            return f"{price:.4f} دلار"
-        elif symbol_key == 'aed':
-            return f"{price:,.0f} تومان"
+    # تتر و درهم به تومان
+    if symbol_key == 'usdt':
+        usd_price = fetch_usd_price()
+        if usd_price:
+            return f"{price * usd_price:,.0f} تومان"
+        return f"{price:.4f} دلار"
+    elif symbol_key == 'aed':
+        return f"{price:,.0f} تومان"
     
+    # بقیه به دلار (بدون واحد)
     if price < 0.001:
         return f"{price:.4e}"
     elif price < 1:
@@ -324,7 +305,6 @@ def format_change(change):
         return f"📉 {change:+.2f}%"
 
 def generate_price_message(selections):
-    usd_price = fetch_usd_price()
     lines = []
     for cat_key, cat in CATEGORIES.items():
         cat_selected = [s for s in cat['symbols'] if s[0] in selections]
@@ -334,8 +314,8 @@ def generate_price_message(selections):
         for key, name, emoji in cat_selected:
             price = get_price(key)
             if price:
-                save_price(key, price)
-            formatted = format_price(price, key, usd_price)
+                save_price(key, price)  # ذخیره قیمت جدید قبل از محاسبه تغییرات
+            formatted = format_price(price, key)
             change = get_price_change(key, price)
             change_text = format_change(change)
             if change_text:
@@ -345,7 +325,6 @@ def generate_price_message(selections):
         lines.append("")
     return "\n".join(lines) if lines else "هیچ نمادی انتخاب نشده است."
 
-# ======== منوی اصلی (بدون دکمه‌های دلار و دیتابیس) ========
 async def show_main_menu(chat_id, user_id):
     text = "📊 **به ربات قیمت‌های لحظه‌ای خوش آمدید!**\n\n"
     text += "لطفاً یک دسته را انتخاب کنید:\n"
@@ -353,6 +332,7 @@ async def show_main_menu(chat_id, user_id):
     for cat_key, cat in CATEGORIES.items():
         keyboard.append([InlineKeyboardButton(f"{cat['emoji']} {cat['name']}", callback_data=f"cat_{cat_key}")])
     keyboard.append([InlineKeyboardButton("📊 نمایش همه", callback_data="show_all")])
+    keyboard.append([InlineKeyboardButton("📋 وضعیت دیتابیس", callback_data="status")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     await send_message(chat_id, text, parse_mode='Markdown', reply_markup=reply_markup)
 
@@ -426,6 +406,9 @@ async def button_handler(update, context):
     if data == "back_categories":
         await show_main_menu(chat_id, user_id)
         return
+    if data == "status":
+        await status_db(chat_id)
+        return
     if data == "clear_all":
         clear_user_selections(user_id)
         await query.edit_message_text("🗑️ همه انتخاب‌ها پاک شد.")
@@ -480,8 +463,8 @@ async def status_single(update, symbol_key, name, emoji):
     if not new_price:
         await send_message(chat_id, f"{emoji} {name}: ⛔ در دسترس نیست.")
         return
-    usd_price = fetch_usd_price()
-    formatted = format_price(new_price, symbol_key, usd_price)
+    save_price(symbol_key, new_price)
+    formatted = format_price(new_price, symbol_key)
     change = get_price_change(symbol_key, new_price)
     change_text = format_change(change)
     if change_text:
@@ -502,7 +485,7 @@ async def bch(update, context): await status_single(update, 'bch', 'BCH', '🔶'
 async def ltc(update, context): await status_single(update, 'ltc', 'LTC', '⚡')
 async def trx(update, context): await status_single(update, 'trx', 'TRX', '🔴')
 async def usdt(update, context): await status_single(update, 'usdt', 'USDT', '💵')
-async def aed(update, context): await status_single(update, 'aed', 'درهم امارات', '🇦🇪')
+async def aed(update, context): await status_single(update, 'aed', 'AED', '🇦🇪')
 async def oil(update, context): await status_single(update, 'oil', 'OIL', '🛢️')
 async def brent(update, context): await status_single(update, 'brent', 'BRENT', '🛢️')
 async def gas(update, context): await status_single(update, 'gas', 'GAS', '🔥')
