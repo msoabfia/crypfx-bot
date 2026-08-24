@@ -77,36 +77,95 @@ CATEGORIES = {
     }
 }
 
-# ======== دریافت قیمت تتر و درهم از tgju.org ========
-def fetch_tgju_prices():
+# ======== دریافت قیمت از tgju.org با دو روش ========
+def fetch_tgju_data():
+    """دریافت داده‌های دلار، تتر، درهم و طلا از tgju.org"""
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
-        }
-        resp = requests.get('https://www.tgju.org/', headers=headers, timeout=15)
-        html = resp.text
-        usdt_match = re.search(r'<span[^>]*id="usdt-price"[^>]*>([\d,]+)</span>', html)
-        if not usdt_match:
-            usdt_match = re.search(r'USDT[^>]*>([\d,]+)</span>', html)
-        aed_match = re.search(r'<span[^>]*id="aed-price"[^>]*>([\d,]+)</span>', html)
-        if not aed_match:
-            aed_match = re.search(r'درهم[^>]*>([\d,]+)</span>', html)
-        usdt_price = int(usdt_match.group(1).replace(',', '')) if usdt_match else None
-        aed_price = int(aed_match.group(1).replace(',', '')) if aed_match else None
-        return usdt_price, aed_price
+        resp = requests.get('https://www.tgju.org/', timeout=10)
+        if resp.status_code != 200:
+            print(f"⚠️ خطا در دریافت از tgju: status {resp.status_code}")
+            return None
+        return resp.text
     except Exception as e:
-        print(f"⚠️ خطا در دریافت از tgju.org: {e}")
-        return None, None
+        print(f"⚠️ خطا در دریافت از tgju: {e}")
+        return None
+
+def extract_price(html, pattern):
+    """استخراج قیمت از HTML با الگوی regex"""
+    match = re.search(pattern, html)
+    if match:
+        price = match.group(1).replace(',', '').strip()
+        return int(float(price))
+    return None
+
+def fetch_usd_price():
+    """دریافت قیمت دلار از tgju.org"""
+    html = fetch_tgju_data()
+    if not html:
+        return None
+    # الگوی قیمت دلار از tgju
+    patterns = [
+        r'<span class="price">([\d,]+)</span>',
+        r'data-price="([\d,]+)"',
+        r'id="price" value="([\d,]+)"',
+    ]
+    for pattern in patterns:
+        price = extract_price(html, pattern)
+        if price:
+            return price
+    return None
 
 def fetch_usdt_price():
-    usdt, _ = fetch_tgju_prices()
-    return usdt
+    """دریافت قیمت تتر از tgju.org"""
+    html = fetch_tgju_data()
+    if not html:
+        return None
+    # الگوی قیمت تتر از tgju
+    patterns = [
+        r'<span class="price">([\d,]+)</span>',
+        r'data-price="([\d,]+)"',
+        r'id="price" value="([\d,]+)"',
+    ]
+    for pattern in patterns:
+        price = extract_price(html, pattern)
+        if price:
+            return price
+    return None
 
 def fetch_aed_price():
-    _, aed = fetch_tgju_prices()
-    return aed
+    """دریافت قیمت درهم از tgju.org"""
+    html = fetch_tgju_data()
+    if not html:
+        return None
+    # الگوی قیمت درهم از tgju
+    patterns = [
+        r'<span class="price">([\d,]+)</span>',
+        r'data-price="([\d,]+)"',
+        r'id="price" value="([\d,]+)"',
+    ]
+    for pattern in patterns:
+        price = extract_price(html, pattern)
+        if price:
+            return price
+    return None
 
-# ======== دریافت قیمت از یاهو ========
+def fetch_gold_price():
+    """دریافت قیمت طلا از tgju.org"""
+    html = fetch_tgju_data()
+    if not html:
+        return None
+    patterns = [
+        r'<span class="price">([\d,]+)</span>',
+        r'data-price="([\d,]+)"',
+        r'id="price" value="([\d,]+)"',
+    ]
+    for pattern in patterns:
+        price = extract_price(html, pattern)
+        if price:
+            return price
+    return None
+
+# ======== دریافت قیمت از یاهو (برای GRAM) ========
 def fetch_yahoo(symbol):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1h&range=1d"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"}
@@ -118,7 +177,6 @@ def fetch_yahoo(symbol):
     except:
         return None
 
-# ======== دریافت قیمت از TwelveData ========
 def fetch_twelve(symbol):
     url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey=f8f6fe94d43b454ba0c9431ff529c466"
     try:
@@ -128,7 +186,6 @@ def fetch_twelve(symbol):
     except:
         return None
 
-# ======== دریافت قیمت از CoinGecko ========
 def fetch_coingecko(symbol):
     url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbol}&vs_currencies=usd"
     try:
@@ -144,10 +201,25 @@ def get_price(symbol_key):
         return None
 
     if symbol_key == 'usdt':
-        return fetch_usdt_price()
+        # فقط از tgju.org
+        price = fetch_usdt_price()
+        if price:
+            return price
+        return None
     elif symbol_key == 'aed':
-        return fetch_aed_price()
+        # فقط از tgju.org
+        price = fetch_aed_price()
+        if price:
+            return price
+        return None
+    elif symbol_key == 'gold':
+        # از tgju.org (طلا) یا یاهو به عنوان پشتیبان
+        price = fetch_gold_price()
+        if price:
+            return price
+        return fetch_yahoo('GC=F')
     elif symbol_key == 'gram':
+        # فقط از یاهو فایننس
         return fetch_yahoo('TON-USD')
     elif symbol_key == 'btc':
         return fetch_yahoo('BTC-USD') or fetch_twelve('BTC/USD')
@@ -167,8 +239,6 @@ def get_price(symbol_key):
         return fetch_yahoo('LTC-USD') or fetch_twelve('LTC/USD')
     elif symbol_key == 'trx':
         return fetch_yahoo('TRX-USD') or fetch_twelve('TRX/USD')
-    elif symbol_key == 'gold':
-        return fetch_yahoo('GC=F')
     elif symbol_key == 'silver':
         return fetch_yahoo('SI=F')
     elif symbol_key == 'oil':
@@ -561,9 +631,9 @@ async def send_startup_message():
             chat_id=CHAT_ID,
             text="✅ **ربات با موفقیت به‌روزرسانی شد!**\n"
                  "📊 قیمت‌ها از منابع جدید دریافت می‌شوند:\n"
-                 "💵 **تتر**: از tgju.org (قیمت بازار آزاد ایران)\n"
+                 "💵 **تتر**: از tgju.org\n"
                  "🇦🇪 **درهم**: از tgju.org\n"
-                 "🔷 **GRAM**: فقط از یاهو فایننس (قیمت دقیق ~1.48 دلار)\n"
+                 "🔷 **GRAM**: فقط از یاهو فایننس\n"
                  "⏱️ هر ۱ دقیقه به‌روزرسانی خودکار",
             parse_mode='Markdown',
             reply_markup=get_simple_keyboard()
