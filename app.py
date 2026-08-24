@@ -77,7 +77,20 @@ CATEGORIES = {
     }
 }
 
-# ======== دریافت قیمت دلار (از tgju.org) ========
+# ======== دریافت قیمت تتر از نوبیتکس (USDT/IRT) ========
+def fetch_usdt_from_nobitex():
+    try:
+        resp = requests.get('https://api.nobitex.ir/market/stats?srcCurrency=usdt&dstCurrency=rls', timeout=10)
+        data = resp.json()
+        # قیمت فروش (bestSell) یا قیمت آخر (lastPrice)
+        price = data['stats']['USDT-IRT']['bestSell']
+        if price:
+            return int(float(price))
+    except Exception as e:
+        print(f"⚠️ خطا در دریافت تتر از نوبیتکس: {e}")
+    return None
+
+# ======== دریافت قیمت دلار (برای تبدیل درهم) ========
 def fetch_usd_price():
     try:
         resp = requests.get('https://www.tgju.org/', timeout=10)
@@ -87,7 +100,7 @@ def fetch_usd_price():
             return int(price)
     except:
         pass
-    return 199900
+    return 199900  # مقدار پیش‌فرض
 
 # ======== دریافت قیمت درهم ========
 def fetch_aed_price():
@@ -104,7 +117,7 @@ def fetch_aed_price():
         pass
     return int(usd_price / 3.67)
 
-# ======== دریافت قیمت ========
+# ======== دریافت قیمت از یاهو ========
 def fetch_yahoo(symbol):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1h&range=1d"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"}
@@ -116,6 +129,7 @@ def fetch_yahoo(symbol):
     except:
         return None
 
+# ======== دریافت قیمت از TwelveData ========
 def fetch_twelve(symbol):
     url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey=f8f6fe94d43b454ba0c9431ff529c466"
     try:
@@ -125,6 +139,7 @@ def fetch_twelve(symbol):
     except:
         return None
 
+# ======== دریافت قیمت از CoinGecko ========
 def fetch_coingecko(symbol):
     url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbol}&vs_currencies=usd"
     try:
@@ -134,13 +149,23 @@ def fetch_coingecko(symbol):
     except:
         return None
 
+# ======== دریافت قیمت اصلی ========
 def get_price(symbol_key):
     """دریافت قیمت جدید (اگر بازار باز باشد)"""
     if not is_market_open(symbol_key):
         return None
 
     if symbol_key == 'usdt':
-        return fetch_twelve('USDT/USD') or fetch_coingecko('tether') or 1.0
+        # اولویت با نوبیتکس
+        price = fetch_usdt_from_nobitex()
+        if price:
+            return price
+        # اگر نوبیتکس جواب نداد، از روش قبلی (TwelveData + دلار) استفاده کن
+        usd_price = fetch_usd_price()
+        if usd_price:
+            usd = fetch_twelve('USDT/USD') or fetch_coingecko('tether') or 1.0
+            return int(usd * usd_price)
+        return None
     elif symbol_key == 'aed':
         return fetch_aed_price()
     elif symbol_key == 'btc':
@@ -150,6 +175,10 @@ def get_price(symbol_key):
     elif symbol_key == 'bnb':
         return fetch_yahoo('BNB-USD') or fetch_twelve('BNB/USD')
     elif symbol_key == 'gram':
+        # اول یاهو، بعد TwelveData، بعد CoinGecko (با اولویت‌بندی جدید)
+        price = fetch_yahoo('TON-USD')
+        if price:
+            return price
         price = fetch_twelve('TON/USD')
         if price:
             return price
@@ -184,9 +213,10 @@ def get_price(symbol_key):
 def is_market_open(symbol_key):
     now = datetime.now()
     today = now.weekday()
+    # ارزهای دیجیتال و واحدهای پولی ۲۴/۷
     if symbol_key in ['btc', 'eth', 'bnb', 'gram', 'xrp', 'sol', 'doge', 'bch', 'ltc', 'trx', 'dot', 'usdt', 'aed']:
         return True
-    if today == 6:
+    if today == 6:  # یکشنبه
         return False
     if symbol_key == 'sugar':
         iran_hour = (now.hour + 3) % 24
@@ -284,11 +314,12 @@ async def send_message(chat_id, text, parse_mode='Markdown', reply_markup=None):
     await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, reply_markup=reply_markup)
 
 def format_price(price, symbol_key):
-    """فرمت‌دهی قیمت: برای تتر و درهم فقط عدد (بدون تومان)، بقیه بدون واحد"""
     if price is None:
         return "⛔ در دسترس نیست"
     if symbol_key in ['usdt', 'aed']:
+        # قیمت به تومان، فقط عدد با کاما
         return f"{price:,.0f}"
+    # بقیه به دلار
     if price < 0.001:
         return f"{price:.4e}"
     elif price < 1:
@@ -307,7 +338,6 @@ def format_change(change):
         return f"📉 {change:+.2f}%"
 
 def get_price_with_old(symbol_key):
-    """دریافت قیمت جدید (اگر بازار باز باشد) و قیمت قبلی"""
     old_price = get_last_price(symbol_key)
     new_price = get_price(symbol_key)
     if new_price is not None:
