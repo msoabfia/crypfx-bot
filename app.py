@@ -77,69 +77,48 @@ CATEGORIES = {
     }
 }
 
-# ======== دریافت قیمت از tgju.org ========
-def fetch_tgju_data():
+# ======== دریافت قیمت تتر و درهم از tgju.org ========
+def fetch_tgju_prices():
+    """دریافت قیمت دلار، تتر و درهم از tgju.org"""
     try:
         resp = requests.get('https://www.tgju.org/', timeout=10)
-        if resp.status_code != 200:
-            return None
-        return resp.text
-    except:
-        return None
+        text = resp.text
+        
+        # قیمت دلار
+        usd_match = re.search(r'<span class="price">([\d,]+)</span>', text)
+        usd_price = int(usd_match.group(1).replace(',', '')) if usd_match else None
+        
+        # قیمت تتر (USDT)
+        usdt_match = re.search(r'<a[^>]*href="/market/usdt-to-rial"[^>]*>.*?<span class="price">([\d,]+)</span>', text, re.DOTALL)
+        if not usdt_match:
+            # روش دوم: جستجوی عمومی‌تر
+            usdt_match = re.search(r'USDT.*?<span class="price">([\d,]+)</span>', text, re.DOTALL)
+        usdt_price = int(usdt_match.group(1).replace(',', '')) if usdt_match else None
+        
+        # قیمت درهم (AED)
+        aed_match = re.search(r'<a[^>]*href="/market/aed-to-rial"[^>]*>.*?<span class="price">([\d,]+)</span>', text, re.DOTALL)
+        if not aed_match:
+            aed_match = re.search(r'درهم.*?<span class="price">([\d,]+)</span>', text, re.DOTALL)
+        aed_price = int(aed_match.group(1).replace(',', '')) if aed_match else None
+        
+        return usd_price, usdt_price, aed_price
+    except Exception as e:
+        print(f"⚠️ خطا در دریافت از tgju: {e}")
+        return None, None, None
 
-def extract_price(html, pattern):
-    match = re.search(pattern, html)
-    if match:
-        price = match.group(1).replace(',', '').strip()
-        return int(float(price))
-    return None
+def fetch_usd_price():
+    usd, _, _ = fetch_tgju_prices()
+    return usd
 
 def fetch_usdt_price():
-    html = fetch_tgju_data()
-    if not html:
-        return None
-    patterns = [
-        r'<span class="price">([\d,]+)</span>',
-        r'data-price="([\d,]+)"',
-        r'id="price" value="([\d,]+)"',
-    ]
-    for pattern in patterns:
-        price = extract_price(html, pattern)
-        if price:
-            return price
-    return None
+    _, usdt, _ = fetch_tgju_prices()
+    return usdt
 
 def fetch_aed_price():
-    html = fetch_tgju_data()
-    if not html:
-        return None
-    patterns = [
-        r'<span class="price">([\d,]+)</span>',
-        r'data-price="([\d,]+)"',
-        r'id="price" value="([\d,]+)"',
-    ]
-    for pattern in patterns:
-        price = extract_price(html, pattern)
-        if price:
-            return price
-    return None
+    _, _, aed = fetch_tgju_prices()
+    return aed
 
-def fetch_gold_price():
-    html = fetch_tgju_data()
-    if not html:
-        return None
-    patterns = [
-        r'<span class="price">([\d,]+)</span>',
-        r'data-price="([\d,]+)"',
-        r'id="price" value="([\d,]+)"',
-    ]
-    for pattern in patterns:
-        price = extract_price(html, pattern)
-        if price:
-            return price
-    return None
-
-# ======== دریافت قیمت از یاهو ========
+# ======== دریافت قیمت از یاهو (فقط برای GRAM) ========
 def fetch_yahoo(symbol):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1h&range=1d"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"}
@@ -152,6 +131,7 @@ def fetch_yahoo(symbol):
         return None
 
 def fetch_twelve(symbol):
+    """پشتیبان برای سایر ارزها (در صورت نیاز)"""
     url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey=f8f6fe94d43b454ba0c9431ff529c466"
     try:
         resp = requests.get(url, timeout=10)
@@ -161,6 +141,7 @@ def fetch_twelve(symbol):
         return None
 
 def fetch_coingecko(symbol):
+    """پشتیبان برای سایر ارزها (در صورت نیاز)"""
     url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbol}&vs_currencies=usd"
     try:
         resp = requests.get(url, timeout=10)
@@ -171,6 +152,7 @@ def fetch_coingecko(symbol):
 
 # ======== دریافت قیمت اصلی ========
 def get_price(symbol_key):
+    """دریافت قیمت جدید (اگر بازار باز باشد)"""
     if not is_market_open(symbol_key):
         return None
 
@@ -178,12 +160,8 @@ def get_price(symbol_key):
         return fetch_usdt_price()
     elif symbol_key == 'aed':
         return fetch_aed_price()
-    elif symbol_key == 'gold':
-        price = fetch_gold_price()
-        if price:
-            return price
-        return fetch_yahoo('GC=F')
     elif symbol_key == 'gram':
+        # فقط از یاهو
         return fetch_yahoo('TON-USD')
     elif symbol_key == 'btc':
         return fetch_yahoo('BTC-USD') or fetch_twelve('BTC/USD')
@@ -203,6 +181,8 @@ def get_price(symbol_key):
         return fetch_yahoo('LTC-USD') or fetch_twelve('LTC/USD')
     elif symbol_key == 'trx':
         return fetch_yahoo('TRX-USD') or fetch_twelve('TRX/USD')
+    elif symbol_key == 'gold':
+        return fetch_yahoo('GC=F')
     elif symbol_key == 'silver':
         return fetch_yahoo('SI=F')
     elif symbol_key == 'oil':
@@ -493,7 +473,7 @@ async def button_handler(update, context):
             return
         sending_active[user_id] = True
         last_sent_summary[user_id] = ""
-        await query.edit_message_text("🚀 **ارسال خودکار شروع شد!**\nهر １ دقیقه قیمت‌های انتخاب‌شده ارسال می‌شود.", parse_mode='Markdown')
+        await query.edit_message_text("🚀 **ارسال خودکار شروع شد!**\nهر ۱ دقیقه قیمت‌های انتخاب‌شده ارسال می‌شود.", parse_mode='Markdown')
         return
     if data == "stop_sending":
         sending_active[user_id] = False
@@ -576,28 +556,8 @@ async def help_command(update, context):
         "📋 **دستورات:**\n"
         "/start - منوی اصلی\n"
         "/all - نمایش قیمت‌های انتخاب‌شده\n"
-        "/status - وضعیت دیتابیس\n"
-        "/aed - قیمت درهم امارات"
+        "/status - وضعیت دیتابیس"
     )
-
-# ======== ارسال پیام به‌روزرسانی (بدون دکمه) ========
-async def send_startup_message():
-    try:
-        bot = Bot(token=TELEGRAM_TOKEN)
-        await asyncio.sleep(3)
-        await bot.send_message(
-            chat_id=CHAT_ID,
-            text="✅ **ربات با موفقیت به‌روزرسانی شد!**\n"
-                 "📊 قیمت‌ها از منابع جدید دریافت می‌شوند:\n"
-                 "💵 **تتر**: از tgju.org\n"
-                 "🇦🇪 **درهم**: از tgju.org\n"
-                 "🔷 **GRAM**: فقط از یاهو فایننس\n"
-                 "⏱️ هر ۱ دقیقه به‌روزرسانی خودکار",
-            parse_mode='Markdown'
-        )
-        print("✅ پیام به‌روزرسانی ارسال شد.")
-    except Exception as e:
-        print(f"⚠️ خطا در ارسال پیام به‌روزرسانی: {e}")
 
 async def auto_send_loop():
     bot = Bot(token=TELEGRAM_TOKEN)
@@ -677,10 +637,4 @@ if __name__ == '__main__':
     auto_thread = threading.Thread(target=start_auto_send, daemon=True)
     auto_thread.start()
 
-    bot_thread = threading.Thread(target=run_bot_in_main_thread, daemon=True)
-    bot_thread.start()
-
-    asyncio.run(send_startup_message())
-
-    while True:
-        time.sleep(1)
+    run_bot_in_main_thread()
