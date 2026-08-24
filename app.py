@@ -77,31 +77,65 @@ CATEGORIES = {
     }
 }
 
-# ======== دریافت قیمت دلار (فقط از tgju.org) ========
+# ======== دریافت قیمت دلار از tgju.org با چندین روش ========
 def fetch_usd_price():
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+    }
     try:
-        resp = requests.get('https://www.tgju.org/', timeout=10)
+        resp = requests.get('https://www.tgju.org/', timeout=10, headers=headers)
+        # روش اول: الگوی price
         match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
         if match:
-            price = match.group(1).replace(',', '')
-            return int(price)
+            return int(match.group(1).replace(',', ''))
+        # روش دوم: الگوی data-price
+        match = re.search(r'data-price="([\d,]+)"', resp.text)
+        if match:
+            return int(match.group(1).replace(',', ''))
+        # روش سوم: جستجوی عددی با ریال
+        match = re.search(r'([\d,]+)\s*تومان', resp.text)
+        if match:
+            return int(match.group(1).replace(',', ''))
+        # روش چهارم: پیدا کردن عدد بزرگ با کاما
+        matches = re.findall(r'([\d,]+)', resp.text)
+        for m in matches:
+            num = int(m.replace(',', ''))
+            if 100000 < num < 1000000:  # محدوده قیمت دلار
+                return num
+    except Exception as e:
+        print(f"⚠️ خطا در دریافت دلار از tgju: {e}")
+    
+    # Fallback به API exchangerate
+    try:
+        resp = requests.get('https://api.exchangerate-api.com/v4/latest/USD', timeout=10)
+        data = resp.json()
+        irr = data['rates'].get('IRR')
+        if irr:
+            return int(irr / 10)
     except:
         pass
+    
     return 199900  # مقدار پیش‌فرض
 
-# ======== دریافت قیمت تتر از tgju ========
+# ======== دریافت قیمت تتر ========
 def fetch_usdt_price():
-    usd_price = fetch_usd_price()
-    if usd_price:
-        return usd_price  # قیمت تتر به تومان برابر با نرخ دلار (۱ تتر = ۱ دلار)
-    return None
+    return fetch_usd_price()
 
-# ======== دریافت قیمت درهم از tgju ========
+# ======== دریافت قیمت درهم ========
 def fetch_aed_price():
     usd_price = fetch_usd_price()
     if not usd_price:
         return None
-    # نرخ درهم به دلار حدود 3.67 است
+    # دریافت نرخ درهم از API
+    try:
+        resp = requests.get('https://api.exchangerate-api.com/v4/latest/USD', timeout=10)
+        data = resp.json()
+        aed_rate = data['rates'].get('AED')
+        if aed_rate:
+            return int(usd_price / aed_rate)
+    except:
+        pass
+    # نرخ تقریبی 3.67
     return int(usd_price / 3.67)
 
 # ======== دریافت قیمت ========
@@ -135,7 +169,6 @@ def fetch_coingecko(symbol):
         return None
 
 def get_price(symbol_key):
-    """دریافت قیمت جدید (اگر بازار باز باشد)"""
     if not is_market_open(symbol_key):
         return None
 
