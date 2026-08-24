@@ -4,6 +4,7 @@ import asyncio
 import time
 import sqlite3
 import requests
+import re
 from datetime import datetime
 from curl_cffi import requests as cffi_requests
 from flask import Flask
@@ -76,41 +77,30 @@ CATEGORIES = {
     }
 }
 
-# ======== دریافت قیمت دلار (API) ========
+# ======== دریافت قیمت دلار (فقط از tgju.org) ========
 def fetch_usd_price():
-    """دریافت قیمت دلار از exchangerate-api.com (به تومان)"""
     try:
-        # دریافت نرخ IRR (ریال) به USD
-        resp = requests.get('https://api.exchangerate-api.com/v4/latest/USD', timeout=10)
-        data = resp.json()
-        irr = data['rates'].get('IRR')
-        if irr:
-            # تبدیل ریال به تومان (تقسیم بر ۱۰)
-            return int(irr / 10)
-    except Exception as e:
-        print(f"⚠️ خطا در دریافت قیمت دلار از API: {e}")
-    
-    # Fallback: مقدار پیش‌فرض (تقریبی)
-    return 200000
+        resp = requests.get('https://www.tgju.org/', timeout=10)
+        match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
+        if match:
+            price = match.group(1).replace(',', '')
+            return int(price)
+    except:
+        pass
+    return 199900  # مقدار پیش‌فرض
 
-# ======== دریافت قیمت تتر ========
+# ======== دریافت قیمت تتر از tgju ========
 def fetch_usdt_price():
-    return fetch_usd_price()
+    usd_price = fetch_usd_price()
+    if usd_price:
+        return usd_price
+    return None
 
-# ======== دریافت قیمت درهم ========
+# ======== دریافت قیمت درهم از tgju ========
 def fetch_aed_price():
     usd_price = fetch_usd_price()
     if not usd_price:
         return None
-    try:
-        resp = requests.get('https://api.exchangerate-api.com/v4/latest/USD', timeout=10)
-        data = resp.json()
-        aed_rate = data['rates'].get('AED')
-        if aed_rate:
-            return int(usd_price / aed_rate)
-    except:
-        pass
-    # نرخ تقریبی 3.67
     return int(usd_price / 3.67)
 
 # ======== دریافت قیمت ========
@@ -144,6 +134,7 @@ def fetch_coingecko(symbol):
         return None
 
 def get_price(symbol_key):
+    """دریافت قیمت جدید (اگر بازار باز باشد)"""
     if not is_market_open(symbol_key):
         return None
 
@@ -158,12 +149,11 @@ def get_price(symbol_key):
     elif symbol_key == 'bnb':
         return fetch_yahoo('BNB-USD') or fetch_twelve('BNB/USD')
     elif symbol_key == 'gram':
-        price = fetch_yahoo('TON-USD')
-        if price:
-            return price
+        # فقط از TwelveData با نماد TON/USD
         price = fetch_twelve('TON/USD')
         if price:
             return price
+        # اگر TwelveData جواب نداد، از CoinGecko استفاده کن
         return fetch_coingecko('the-open-network')
     elif symbol_key == 'xrp':
         return fetch_yahoo('XRP-USD') or fetch_twelve('XRP/USD')
