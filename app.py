@@ -77,60 +77,33 @@ CATEGORIES = {
     }
 }
 
-# ======== دریافت قیمت دلار (از tgju + نوبیتکس) ========
-def fetch_usd_price():
-    # منبع اول: tgju.org
-    try:
-        resp = requests.get('https://www.tgju.org/', timeout=8)
-        match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
-        if match:
-            price = match.group(1).replace(',', '')
-            return int(price)
-    except:
-        pass
-    
-    # منبع دوم: نوبیتکس (قیمت تتر به تومان)
-    try:
-        resp = requests.get('https://api.nobitex.ir/market/stats?srcCurrency=usdt&dstCurrency=rls', timeout=8)
-        data = resp.json()
-        if data.get('stats') and 'USDT-IRT' in data['stats']:
-            price = data['stats']['USDT-IRT'].get('bestSell')
-            if price:
-                return int(float(price))
-    except:
-        pass
-    
-    return None
-
-# ======== دریافت قیمت تتر ========
+# ======== دریافت قیمت تتر از ارزدیجیتال (ArzDigital) ========
 def fetch_usdt_price():
-    price = fetch_usd_price()
-    if price:
-        return price
-    return None
-
-# ======== دریافت قیمت درهم ========
-def fetch_aed_price():
-    usd_price = fetch_usd_price()
-    if not usd_price:
-        return None
-    return int(usd_price / 3.67)
-
-# ======== دریافت قیمت GRAM (فقط از TwelveData) ========
-def fetch_gram_price():
     try:
-        resp = requests.get(
-            'https://api.twelvedata.com/price?symbol=TON/USD&apikey=f8f6fe94d43b454ba0c9431ff529c466',
-            timeout=8
-        )
-        data = resp.json()
-        if data.get('price'):
-            return float(data['price'])
+        resp = requests.get('https://arzdigital.com/price/usdt/', timeout=8)
+        if resp.status_code == 200:
+            match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
+            if match:
+                price = match.group(1).replace(',', '')
+                return int(price)
     except:
         pass
     return None
 
-# ======== دریافت قیمت از یاهو ========
+# ======== دریافت قیمت درهم از ارزدیجیتال (ArzDigital) ========
+def fetch_aed_price():
+    try:
+        resp = requests.get('https://arzdigital.com/price/aed/', timeout=8)
+        if resp.status_code == 200:
+            match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
+            if match:
+                price = match.group(1).replace(',', '')
+                return int(price)
+    except:
+        pass
+    return None
+
+# ======== دریافت قیمت از یاهو (برای بقیه) ========
 def fetch_yahoo(symbol):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1h&range=1d"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"}
@@ -142,26 +115,8 @@ def fetch_yahoo(symbol):
     except:
         return None
 
-def fetch_twelve(symbol):
-    url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey=f8f6fe94d43b454ba0c9431ff529c466"
-    try:
-        resp = requests.get(url, timeout=8)
-        data = resp.json()
-        return float(data['price']) if 'price' in data else None
-    except:
-        return None
-
-def fetch_coingecko(symbol):
-    url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbol}&vs_currencies=usd"
-    try:
-        resp = requests.get(url, timeout=8)
-        data = resp.json()
-        return float(data[symbol]['usd'])
-    except:
-        return None
-
+# ======== دریافت قیمت ========
 def get_price(symbol_key):
-    """دریافت قیمت با منبع مناسب برای هر نماد"""
     if not is_market_open(symbol_key):
         return None
 
@@ -169,26 +124,26 @@ def get_price(symbol_key):
         return fetch_usdt_price()
     elif symbol_key == 'aed':
         return fetch_aed_price()
-    elif symbol_key == 'gram':
-        return fetch_gram_price()
     elif symbol_key == 'btc':
-        return fetch_yahoo('BTC-USD') or fetch_twelve('BTC/USD')
+        return fetch_yahoo('BTC-USD')
     elif symbol_key == 'eth':
-        return fetch_yahoo('ETH-USD') or fetch_twelve('ETH/USD')
+        return fetch_yahoo('ETH-USD')
     elif symbol_key == 'bnb':
-        return fetch_yahoo('BNB-USD') or fetch_twelve('BNB/USD')
+        return fetch_yahoo('BNB-USD')
+    elif symbol_key == 'gram':
+        return fetch_yahoo('TON-USD')
     elif symbol_key == 'xrp':
-        return fetch_yahoo('XRP-USD') or fetch_twelve('XRP/USD')
+        return fetch_yahoo('XRP-USD')
     elif symbol_key == 'sol':
-        return fetch_yahoo('SOL-USD') or fetch_twelve('SOL/USD')
+        return fetch_yahoo('SOL-USD')
     elif symbol_key == 'doge':
-        return fetch_yahoo('DOGE-USD') or fetch_twelve('DOGE/USD')
+        return fetch_yahoo('DOGE-USD')
     elif symbol_key == 'bch':
-        return fetch_yahoo('BCH-USD') or fetch_twelve('BCH/USD')
+        return fetch_yahoo('BCH-USD')
     elif symbol_key == 'ltc':
-        return fetch_yahoo('LTC-USD') or fetch_twelve('LTC/USD')
+        return fetch_yahoo('LTC-USD')
     elif symbol_key == 'trx':
-        return fetch_yahoo('TRX-USD') or fetch_twelve('TRX/USD')
+        return fetch_yahoo('TRX-USD')
     elif symbol_key == 'gold':
         return fetch_yahoo('GC=F')
     elif symbol_key == 'silver':
