@@ -87,14 +87,13 @@ def fetch_usd_price():
             return int(price)
     except:
         pass
-    return 199900  # مقدار پیش‌فرض
+    return 199900
 
 # ======== دریافت قیمت تتر (از TwelveData یا CoinGecko + نرخ دلار) ========
 def fetch_usdt_price():
     usd_price = fetch_usd_price()
     if not usd_price:
         return None
-    # دریافت قیمت USDT به دلار
     usdt_usd = fetch_twelve('USDT/USD') or fetch_coingecko('tether') or 1.0
     return int(usdt_usd * usd_price)
 
@@ -147,16 +146,14 @@ def fetch_coingecko(symbol):
 
 # ======== دریافت قیمت اصلی ========
 def get_price(symbol_key):
-    """دریافت قیمت جدید (اگر بازار باز باشد)"""
     if not is_market_open(symbol_key):
         return None
 
     if symbol_key == 'usdt':
-        return fetch_usdt_price()  # از tgju + TwelveData
+        return fetch_usdt_price()
     elif symbol_key == 'aed':
         return fetch_aed_price()
     elif symbol_key == 'gram':
-        # فقط از یاهو
         return fetch_yahoo('TON-USD')
     elif symbol_key == 'btc':
         return fetch_yahoo('BTC-USD') or fetch_twelve('BTC/USD')
@@ -352,6 +349,9 @@ def generate_price_message(selections):
         lines.append("")
     return "\n".join(lines) if lines else "هیچ نمادی انتخاب نشده است."
 
+def get_simple_keyboard():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("📋 منوی اصلی", callback_data="menu")]])
+
 async def show_main_menu(chat_id, user_id):
     text = "📊 **به ربات قیمت‌های لحظه‌ای خوش آمدید!**\n\n"
     text += "لطفاً یک دسته را انتخاب کنید:\n"
@@ -430,6 +430,9 @@ async def button_handler(update, context):
     chat_id = query.message.chat.id
     data = query.data
 
+    if data == "menu":
+        await show_main_menu(chat_id, user_id)
+        return
     if data == "back_categories":
         await show_main_menu(chat_id, user_id)
         return
@@ -555,12 +558,11 @@ async def help_command(update, context):
         "/aed - قیمت درهم امارات"
     )
 
-# ======== ارسال پیام به‌روزرسانی ========
+# ======== ارسال پیام به‌روزرسانی با دکمه ========
 async def send_startup_message():
-    """ارسال پیام به‌روزرسانی هنگام راه‌اندازی ربات"""
     try:
         bot = Bot(token=TELEGRAM_TOKEN)
-        await asyncio.sleep(3)  # صبر برای اطمینان از اتصال
+        await asyncio.sleep(3)
         await bot.send_message(
             chat_id=CHAT_ID,
             text="✅ **ربات با موفقیت به‌روزرسانی شد!**\n"
@@ -568,13 +570,13 @@ async def send_startup_message():
                  "💵 **تتر**: از tgju.org + TwelveData\n"
                  "🔷 **GRAM**: فقط از یاهو فایننس\n"
                  "⏱️ هر ۱ دقیقه به‌روزرسانی خودکار",
-            parse_mode='Markdown'
+            parse_mode='Markdown',
+            reply_markup=get_simple_keyboard()
         )
-        print("✅ پیام به‌روزرسانی ارسال شد.")
+        print("✅ پیام به‌روزرسانی با دکمه ارسال شد.")
     except Exception as e:
         print(f"⚠️ خطا در ارسال پیام به‌روزرسانی: {e}")
 
-# ======== اجرای ربات ========
 async def auto_send_loop():
     bot = Bot(token=TELEGRAM_TOKEN)
     while True:
@@ -653,13 +655,10 @@ if __name__ == '__main__':
     auto_thread = threading.Thread(target=start_auto_send, daemon=True)
     auto_thread.start()
 
-    # اجرای ربات در یک ترد جداگانه
     bot_thread = threading.Thread(target=run_bot_in_main_thread, daemon=True)
     bot_thread.start()
 
-    # ارسال پیام به‌روزرسانی پس از چند ثانیه
     asyncio.run(send_startup_message())
 
-    # نگهداشتن برنامه
     while True:
         time.sleep(1)
