@@ -4,7 +4,6 @@ import asyncio
 import time
 import sqlite3
 import requests
-import re
 from datetime import datetime
 from curl_cffi import requests as cffi_requests
 from flask import Flask
@@ -77,45 +76,22 @@ CATEGORIES = {
     }
 }
 
-# ======== دریافت قیمت دلار از tgju.org با چندین روش ========
+# ======== دریافت قیمت دلار (API) ========
 def fetch_usd_price():
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
-    }
+    """دریافت قیمت دلار از exchangerate-api.com (به تومان)"""
     try:
-        resp = requests.get('https://www.tgju.org/', timeout=10, headers=headers)
-        # روش اول: الگوی price
-        match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
-        if match:
-            return int(match.group(1).replace(',', ''))
-        # روش دوم: الگوی data-price
-        match = re.search(r'data-price="([\d,]+)"', resp.text)
-        if match:
-            return int(match.group(1).replace(',', ''))
-        # روش سوم: جستجوی عددی با ریال
-        match = re.search(r'([\d,]+)\s*تومان', resp.text)
-        if match:
-            return int(match.group(1).replace(',', ''))
-        # روش چهارم: پیدا کردن عدد بزرگ با کاما
-        matches = re.findall(r'([\d,]+)', resp.text)
-        for m in matches:
-            num = int(m.replace(',', ''))
-            if 100000 < num < 1000000:  # محدوده قیمت دلار
-                return num
-    except Exception as e:
-        print(f"⚠️ خطا در دریافت دلار از tgju: {e}")
-    
-    # Fallback به API exchangerate
-    try:
+        # دریافت نرخ IRR (ریال) به USD
         resp = requests.get('https://api.exchangerate-api.com/v4/latest/USD', timeout=10)
         data = resp.json()
         irr = data['rates'].get('IRR')
         if irr:
+            # تبدیل ریال به تومان (تقسیم بر ۱۰)
             return int(irr / 10)
-    except:
-        pass
+    except Exception as e:
+        print(f"⚠️ خطا در دریافت قیمت دلار از API: {e}")
     
-    return 199900  # مقدار پیش‌فرض
+    # Fallback: مقدار پیش‌فرض (تقریبی)
+    return 200000
 
 # ======== دریافت قیمت تتر ========
 def fetch_usdt_price():
@@ -126,7 +102,6 @@ def fetch_aed_price():
     usd_price = fetch_usd_price()
     if not usd_price:
         return None
-    # دریافت نرخ درهم از API
     try:
         resp = requests.get('https://api.exchangerate-api.com/v4/latest/USD', timeout=10)
         data = resp.json()
