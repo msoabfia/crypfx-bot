@@ -77,74 +77,42 @@ CATEGORIES = {
     }
 }
 
-# ======== دریافت قیمت از Alanchand (tgju.org) برای تتر و درهم ========
-def fetch_from_alanchand():
-    """دریافت قیمت تتر و درهم از Alanchand (tgju.org)"""
-    try:
-        resp = requests.get('https://www.tgju.org/', timeout=10)
-        if resp.status_code != 200:
-            print(f"⚠️ خطا در دریافت از Alanchand: status {resp.status_code}")
-            return None
-        return resp.text
-    except Exception as e:
-        print(f"⚠️ خطا در دریافت از Alanchand: {e}")
-        return None
-
-def extract_price_from_alanchand(html, pattern):
-    """استخراج قیمت از HTML Alanchand"""
-    match = re.search(pattern, html)
-    if match:
-        price = match.group(1).replace(',', '').strip()
-        return int(float(price))
-    return None
-
-def fetch_usdt_price():
-    """دریافت قیمت تتر از Alanchand (tgju.org)"""
-    html = fetch_from_alanchand()
-    if not html:
-        return None
-    patterns = [
-        r'<span class="price">([\d,]+)</span>',
-        r'data-price="([\d,]+)"',
-        r'id="price" value="([\d,]+)"',
-    ]
-    for pattern in patterns:
-        price = extract_price_from_alanchand(html, pattern)
-        if price:
-            return price
-    return None
-
-def fetch_aed_price():
-    """دریافت قیمت درهم از Alanchand (tgju.org)"""
-    html = fetch_from_alanchand()
-    if not html:
-        return None
-    patterns = [
-        r'<span class="price">([\d,]+)</span>',
-        r'data-price="([\d,]+)"',
-        r'id="price" value="([\d,]+)"',
-    ]
-    for pattern in patterns:
-        price = extract_price_from_alanchand(html, pattern)
-        if price:
-            return price
-    return None
-
 # ======== دریافت قیمت GRAM از CoinGecko ========
 def fetch_gram_price():
-    """دریافت قیمت GRAM از CoinGecko API"""
     try:
         url = "https://api.coingecko.com/api/v3/simple/price?ids=the-open-network&vs_currencies=usd"
         resp = requests.get(url, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            return data.get('the-open-network', {}).get('usd')
+        data = resp.json()
+        if 'the-open-network' in data:
+            return float(data['the-open-network']['usd'])
         return None
     except Exception as e:
-        print(f"⚠️ خطا در دریافت GRAM از CoinGecko: {e}")
+        print(f"⚠️ خطا در دریافت قیمت GRAM از CoinGecko: {e}")
         return None
 
-# ======== دریافت قیمت از یاهو (برای سایر ارزها) ========
+# ======== دریافت قیمت تتر و درهم از Alanchand ========
+def fetch_alanchand_price():
+    try:
+        resp = requests.get('https://api.alanchand.com/v1/price/all', timeout=10)
+        data = resp.json()
+        return data
+    except Exception as e:
+        print(f"⚠️ خطا در دریافت قیمت از Alanchand: {e}")
+        return None
+
+def fetch_usdt_from_alanchand():
+    data = fetch_alanchand_price()
+    if data and 'USDT' in data:
+        return int(data['USDT'])
+    return None
+
+def fetch_aed_from_alanchand():
+    data = fetch_alanchand_price()
+    if data and 'AED' in data:
+        return int(data['AED'])
+    return None
+
+# ======== دریافت قیمت ========
 def fetch_yahoo(symbol):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1h&range=1d"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"}
@@ -165,25 +133,25 @@ def fetch_twelve(symbol):
     except:
         return None
 
-def fetch_coingecko(symbol):
-    url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbol}&vs_currencies=usd"
-    try:
-        resp = requests.get(url, timeout=10)
-        data = resp.json()
-        return float(data[symbol]['usd'])
-    except:
-        return None
-
-# ======== دریافت قیمت اصلی ========
 def get_price(symbol_key):
+    """دریافت قیمت جدید (اگر بازار باز باشد)"""
     if not is_market_open(symbol_key):
         return None
 
     if symbol_key == 'usdt':
-        return fetch_usdt_price()
+        # فقط Alanchand
+        price = fetch_usdt_from_alanchand()
+        if price:
+            return price
+        return None
     elif symbol_key == 'aed':
-        return fetch_aed_price()
+        # فقط Alanchand
+        price = fetch_aed_from_alanchand()
+        if price:
+            return price
+        return None
     elif symbol_key == 'gram':
+        # فقط CoinGecko
         return fetch_gram_price()
     elif symbol_key == 'btc':
         return fetch_yahoo('BTC-USD') or fetch_twelve('BTC/USD')
@@ -582,24 +550,6 @@ async def help_command(update, context):
         "/aed - قیمت درهم امارات"
     )
 
-# ======== ارسال پیام به‌روزرسانی (بدون دکمه) ========
-async def send_startup_message():
-    try:
-        bot = Bot(token=TELEGRAM_TOKEN)
-        await asyncio.sleep(3)
-        await bot.send_message(
-            chat_id=CHAT_ID,
-            text="✅ **ربات با موفقیت به‌روزرسانی شد!**\n"
-                 "📊 قیمت‌ها از منابع جدید دریافت می‌شوند:\n"
-                 "💵 **تتر** و 🇦🇪 **درهم**: از Alanchand (tgju.org)\n"
-                 "🔷 **GRAM**: فقط از CoinGecko\n"
-                 "⏱️ هر ۱ دقیقه به‌روزرسانی خودکار",
-            parse_mode='Markdown'
-        )
-        print("✅ پیام به‌روزرسانی ارسال شد.")
-    except Exception as e:
-        print(f"⚠️ خطا در ارسال پیام به‌روزرسانی: {e}")
-
 async def auto_send_loop():
     bot = Bot(token=TELEGRAM_TOKEN)
     while True:
@@ -678,10 +628,4 @@ if __name__ == '__main__':
     auto_thread = threading.Thread(target=start_auto_send, daemon=True)
     auto_thread.start()
 
-    bot_thread = threading.Thread(target=run_bot_in_main_thread, daemon=True)
-    bot_thread.start()
-
-    asyncio.run(send_startup_message())
-
-    while True:
-        time.sleep(1)
+    run_bot_in_main_thread()
