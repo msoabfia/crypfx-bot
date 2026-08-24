@@ -77,26 +77,39 @@ CATEGORIES = {
     }
 }
 
-# ======== دریافت قیمت دلار (فقط از tgju.org) ========
+# ======== دریافت قیمت دلار (اول tgju، سپس نوبیتکس) ========
 def fetch_usd_price():
+    # منبع اول: tgju.org
     try:
         resp = requests.get('https://www.tgju.org/', timeout=10)
+        # الگوی جدید برای دریافت قیمت دلار (با دقت بیشتر)
         match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
         if match:
             price = match.group(1).replace(',', '')
             return int(price)
     except:
         pass
-    return 199900  # مقدار پیش‌فرض
+    
+    # منبع دوم: نوبیتکس (قیمت تتر به تومان)
+    try:
+        resp = requests.get('https://api.nobitex.ir/market/stats?srcCurrency=usdt&dstCurrency=rls', timeout=10)
+        data = resp.json()
+        price = data['stats']['USDT-IRT']['bestSell']
+        if price:
+            return int(float(price))
+    except:
+        pass
+    
+    return 202000  # مقدار پیش‌فرض (مطابق با قیمت‌های روز)
 
-# ======== دریافت قیمت تتر از tgju ========
+# ======== دریافت قیمت تتر ========
 def fetch_usdt_price():
     usd_price = fetch_usd_price()
     if usd_price:
         return usd_price
     return None
 
-# ======== دریافت قیمت درهم از tgju ========
+# ======== دریافت قیمت درهم ========
 def fetch_aed_price():
     usd_price = fetch_usd_price()
     if not usd_price:
@@ -149,11 +162,9 @@ def get_price(symbol_key):
     elif symbol_key == 'bnb':
         return fetch_yahoo('BNB-USD') or fetch_twelve('BNB/USD')
     elif symbol_key == 'gram':
-        # فقط از TwelveData با نماد TON/USD
         price = fetch_twelve('TON/USD')
         if price:
             return price
-        # اگر TwelveData جواب نداد، از CoinGecko استفاده کن
         return fetch_coingecko('the-open-network')
     elif symbol_key == 'xrp':
         return fetch_yahoo('XRP-USD') or fetch_twelve('XRP/USD')
@@ -289,6 +300,8 @@ def format_price(price, symbol_key):
         return "⛔ در دسترس نیست"
     if symbol_key in ['usdt', 'aed']:
         return f"{price:,.0f}"
+    if symbol_key == 'gram':
+        return f"{price:,.4f}"
     if price < 0.001:
         return f"{price:.4e}"
     elif price < 1:
