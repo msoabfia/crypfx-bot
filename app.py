@@ -77,19 +77,7 @@ CATEGORIES = {
     }
 }
 
-# ======== دریافت قیمت تتر از نوبیتکس (فقط نوبیتکس) ========
-def fetch_usdt_from_nobitex():
-    try:
-        resp = requests.get('https://api.nobitex.ir/market/stats?srcCurrency=usdt&dstCurrency=rls', timeout=10)
-        data = resp.json()
-        price = data['stats']['USDT-IRT']['bestSell']
-        if price:
-            return int(float(price))
-    except Exception as e:
-        print(f"⚠️ خطا در دریافت تتر از نوبیتکس: {e}")
-    return None
-
-# ======== دریافت قیمت دلار (برای تبدیل درهم) ========
+# ======== دریافت قیمت دلار از tgju.org ========
 def fetch_usd_price():
     try:
         resp = requests.get('https://www.tgju.org/', timeout=10)
@@ -99,7 +87,16 @@ def fetch_usd_price():
             return int(price)
     except:
         pass
-    return 199900
+    return 199900  # مقدار پیش‌فرض
+
+# ======== دریافت قیمت تتر (از TwelveData یا CoinGecko + نرخ دلار) ========
+def fetch_usdt_price():
+    usd_price = fetch_usd_price()
+    if not usd_price:
+        return None
+    # دریافت قیمت USDT به دلار
+    usdt_usd = fetch_twelve('USDT/USD') or fetch_coingecko('tether') or 1.0
+    return int(usdt_usd * usd_price)
 
 # ======== دریافت قیمت درهم ========
 def fetch_aed_price():
@@ -155,26 +152,18 @@ def get_price(symbol_key):
         return None
 
     if symbol_key == 'usdt':
-        # فقط از نوبیتکس
-        price = fetch_usdt_from_nobitex()
-        return price  # اگر None باشد، همان None برمی‌گردد
+        return fetch_usdt_price()  # از tgju + TwelveData
     elif symbol_key == 'aed':
         return fetch_aed_price()
+    elif symbol_key == 'gram':
+        # فقط از یاهو
+        return fetch_yahoo('TON-USD')
     elif symbol_key == 'btc':
         return fetch_yahoo('BTC-USD') or fetch_twelve('BTC/USD')
     elif symbol_key == 'eth':
         return fetch_yahoo('ETH-USD') or fetch_twelve('ETH/USD')
     elif symbol_key == 'bnb':
         return fetch_yahoo('BNB-USD') or fetch_twelve('BNB/USD')
-    elif symbol_key == 'gram':
-        # اول TwelveData، بعد CoinGecko، آخر یاهو (با اولویت‌بندی جدید)
-        price = fetch_twelve('TON/USD')
-        if price:
-            return price
-        price = fetch_coingecko('the-open-network')
-        if price:
-            return price
-        return fetch_yahoo('TON-USD')
     elif symbol_key == 'xrp':
         return fetch_yahoo('XRP-USD') or fetch_twelve('XRP/USD')
     elif symbol_key == 'sol':
@@ -566,6 +555,26 @@ async def help_command(update, context):
         "/aed - قیمت درهم امارات"
     )
 
+# ======== ارسال پیام به‌روزرسانی ========
+async def send_startup_message():
+    """ارسال پیام به‌روزرسانی هنگام راه‌اندازی ربات"""
+    try:
+        bot = Bot(token=TELEGRAM_TOKEN)
+        await asyncio.sleep(3)  # صبر برای اطمینان از اتصال
+        await bot.send_message(
+            chat_id=CHAT_ID,
+            text="✅ **ربات با موفقیت به‌روزرسانی شد!**\n"
+                 "📊 قیمت‌ها از منابع جدید دریافت می‌شوند:\n"
+                 "💵 **تتر**: از tgju.org + TwelveData\n"
+                 "🔷 **GRAM**: فقط از یاهو فایننس\n"
+                 "⏱️ هر ۱ دقیقه به‌روزرسانی خودکار",
+            parse_mode='Markdown'
+        )
+        print("✅ پیام به‌روزرسانی ارسال شد.")
+    except Exception as e:
+        print(f"⚠️ خطا در ارسال پیام به‌روزرسانی: {e}")
+
+# ======== اجرای ربات ========
 async def auto_send_loop():
     bot = Bot(token=TELEGRAM_TOKEN)
     while True:
@@ -644,4 +653,13 @@ if __name__ == '__main__':
     auto_thread = threading.Thread(target=start_auto_send, daemon=True)
     auto_thread.start()
 
-    run_bot_in_main_thread()
+    # اجرای ربات در یک ترد جداگانه
+    bot_thread = threading.Thread(target=run_bot_in_main_thread, daemon=True)
+    bot_thread.start()
+
+    # ارسال پیام به‌روزرسانی پس از چند ثانیه
+    asyncio.run(send_startup_message())
+
+    # نگهداشتن برنامه
+    while True:
+        time.sleep(1)
