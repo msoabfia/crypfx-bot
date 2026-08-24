@@ -1,4 +1,5 @@
 import os
+os.environ['TZ'] = 'UTC'
 import asyncio
 import time
 import sqlite3
@@ -9,21 +10,19 @@ from curl_cffi import requests as cffi_requests
 from flask import Flask
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram.error import TimedOut, NetworkError
 import logging
 import threading
 
-# ======== تنظیمات ========
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN environment variable not set!")
 CHAT_ID = os.environ.get('CHAT_ID', '483833953')
 INTERVAL = 60
 TIMEOUT = 30
-# =========================
 
 logging.basicConfig(level=logging.ERROR)
 
-# ======== دسته‌بندی نمادها ========
 CATEGORIES = {
     'fiat': {
         'name': 'واحد پولی(تومان)',
@@ -75,9 +74,78 @@ CATEGORIES = {
     }
 }
 
-# ======== دریافت قیمت تتر ========
+# ======== دیتابیس ========
+DB_PATH = "market_data.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS prices
+                 (symbol TEXT, timestamp TEXT, price REAL, PRIMARY KEY (symbol, timestamp))''')
+    c.execute('''CREATE TABLE IF NOT EXISTS history
+                 (symbol TEXT, timestamp TEXT, price REAL)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS user_selections
+                 (user_id INTEGER, symbol TEXT, PRIMARY KEY (user_id, symbol))''')
+    conn.commit()
+    conn.close()
+
+def save_price(symbol, price):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('INSERT INTO prices (symbol, timestamp, price) VALUES (?, ?, ?)',
+              (symbol, datetime.now().isoformat(), price))
+    conn.commit()
+    conn.close()
+
+def get_last_price(symbol):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT price FROM prices WHERE symbol=? ORDER BY timestamp DESC LIMIT 1', (symbol,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def get_user_selections(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT symbol FROM user_selections WHERE user_id=?', (user_id,))
+    rows = c.fetchall()
+    conn.close()
+    return [row[0] for row in rows]
+
+def save_user_selection(user_id, symbol):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('INSERT OR IGNORE INTO user_selections (user_id, symbol) VALUES (?, ?)', (user_id, symbol))
+    conn.commit()
+    conn.close()
+
+def remove_user_selection(user_id, symbol):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('DELETE FROM user_selections WHERE user_id=? AND symbol=?', (user_id, symbol))
+    conn.commit()
+    conn.close()
+
+def clear_user_selections(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('DELETE FROM user_selections WHERE user_id=?', (user_id,))
+    conn.commit()
+    conn.close()
+
+def select_all_symbols(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('DELETE FROM user_selections WHERE user_id=?', (user_id,))
+    for category in CATEGORIES.values():
+        for key, _, _ in category['symbols']:
+            c.execute('INSERT OR IGNORE INTO user_selections (user_id, symbol) VALUES (?, ?)', (user_id, key))
+    conn.commit()
+    conn.close()
+
+# ======== دریافت قیمت ========
 def fetch_usdt_price():
-    # منبع ۱: ارزدیجیتال
     try:
         resp = requests.get('https://arzdigital.com/price/usdt/', timeout=8)
         if resp.status_code == 200:
@@ -86,8 +154,6 @@ def fetch_usdt_price():
                 return int(match.group(1).replace(',', ''))
     except:
         pass
-    
-    # منبع ۲: نوبیتکس
     try:
         resp = requests.get('https://api.nobitex.ir/market/stats?srcCurrency=usdt&dstCurrency=rls', timeout=8)
         data = resp.json()
@@ -97,8 +163,6 @@ def fetch_usdt_price():
                 return int(float(price))
     except:
         pass
-    
-    # منبع ۳: tgju.org
     try:
         resp = requests.get('https://www.tgju.org/', timeout=8)
         match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
@@ -106,8 +170,6 @@ def fetch_usdt_price():
             return int(match.group(1).replace(',', ''))
     except:
         pass
-    
-    # منبع ۴: bonbast.com
     try:
         resp = requests.get('https://bonbast.com/', timeout=8)
         if resp.status_code == 200:
@@ -116,12 +178,9 @@ def fetch_usdt_price():
                 return int(match.group(1).replace(',', ''))
     except:
         pass
-    
     return None
 
-# ======== دریافت قیمت درهم ========
 def fetch_aed_price():
-    # منبع ۱: ارزدیجیتال
     try:
         resp = requests.get('https://arzdigital.com/price/aed/', timeout=8)
         if resp.status_code == 200:
@@ -130,8 +189,6 @@ def fetch_aed_price():
                 return int(match.group(1).replace(',', ''))
     except:
         pass
-    
-    # منبع ۲: bonbast.com
     try:
         resp = requests.get('https://bonbast.com/', timeout=8)
         if resp.status_code == 200:
@@ -140,8 +197,6 @@ def fetch_aed_price():
                 return int(match.group(1).replace(',', ''))
     except:
         pass
-    
-    # منبع ۳: محاسبه از tgju
     try:
         resp = requests.get('https://www.tgju.org/', timeout=8)
         match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
@@ -150,10 +205,8 @@ def fetch_aed_price():
             return int(usd / 3.67)
     except:
         pass
-    
     return None
 
-# ======== دریافت قیمت از یاهو ========
 def fetch_yahoo(symbol):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1h&range=1d"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"}
@@ -165,11 +218,9 @@ def fetch_yahoo(symbol):
     except:
         return None
 
-# ======== دریافت قیمت ========
 def get_price(symbol_key):
     if not is_market_open(symbol_key):
         return None
-
     if symbol_key == 'usdt':
         return fetch_usdt_price()
     elif symbol_key == 'aed':
@@ -236,37 +287,6 @@ def is_market_open(symbol_key):
             return True
         return False
     return True
-
-# ======== دیتابیس ========
-DB_PATH = "market_data.db"
-
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS prices
-                 (symbol TEXT, timestamp TEXT, price REAL, PRIMARY KEY (symbol, timestamp))''')
-    c.execute('''CREATE TABLE IF NOT EXISTS history
-                 (symbol TEXT, timestamp TEXT, price REAL)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS user_selections
-                 (user_id INTEGER, symbol TEXT, PRIMARY KEY (user_id, symbol))''')
-    conn.commit()
-    conn.close()
-
-def save_price(symbol, price):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('INSERT INTO prices (symbol, timestamp, price) VALUES (?, ?, ?)',
-              (symbol, datetime.now().isoformat(), price))
-    conn.commit()
-    conn.close()
-
-def get_last_price(symbol):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT price FROM prices WHERE symbol=? ORDER BY timestamp DESC LIMIT 1', (symbol,))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else None
 
 # ======== توابع ربات ========
 sending_active = {}
@@ -545,18 +565,6 @@ async def help_command(update, context):
         "/aed - قیمت درهم امارات"
     )
 
-# ======== Flask ========
-flask_app = Flask(__name__)
-
-@flask_app.route('/')
-def home():
-    return "✅ ربات در حال اجراست!"
-
-@flask_app.route('/health')
-def health():
-    return "OK"
-
-# ======== حلقه خودکار ========
 async def auto_send_loop():
     bot = Bot(token=TELEGRAM_TOKEN)
     while True:
@@ -611,6 +619,16 @@ def run_bot_in_main_thread():
     app.add_handler(CallbackQueryHandler(button_handler))
     print("🤖 ربات در حال اجرا...")
     app.run_polling()
+
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def home():
+    return "✅ ربات در حال اجراست!"
+
+@flask_app.route('/health')
+def health():
+    return "OK"
 
 def run_flask():
     port = int(os.environ.get('PORT', 10000))
