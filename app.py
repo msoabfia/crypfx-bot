@@ -77,7 +77,7 @@ CATEGORIES = {
     }
 }
 
-# ======== دریافت قیمت تتر (از ۳ منبع پشت سر هم) ========
+# ======== دریافت قیمت تتر ========
 def fetch_usdt_price():
     # منبع اول: ارزدیجیتال
     try:
@@ -113,7 +113,7 @@ def fetch_usdt_price():
     
     return None
 
-# ======== دریافت قیمت درهم (از ۲ منبع پشت سر هم) ========
+# ======== دریافت قیمت درهم ========
 def fetch_aed_price():
     # منبع اول: ارزدیجیتال
     try:
@@ -126,14 +126,12 @@ def fetch_aed_price():
     except:
         pass
     
-    # منبع دوم: tgju.org
+    # منبع دوم: tgju.org (محاسبه از دلار)
     try:
         resp = requests.get('https://www.tgju.org/', timeout=8)
-        # الگوی قیمت دلار در tgju (درهم هم معمولاً کنارش هست، ولی ما از نرخ دلار محاسبه می‌کنیم)
         match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
         if match:
             usd_price = int(match.group(1).replace(',', ''))
-            # تبدیل دلار به درهم با نرخ ثابت 3.67
             return int(usd_price / 3.67)
     except:
         pass
@@ -152,6 +150,7 @@ def fetch_yahoo(symbol):
     except:
         return None
 
+# ======== دریافت قیمت ========
 def get_price(symbol_key):
     if not is_market_open(symbol_key):
         return None
@@ -160,14 +159,26 @@ def get_price(symbol_key):
         return fetch_usdt_price()
     elif symbol_key == 'aed':
         return fetch_aed_price()
+    elif symbol_key == 'gram':
+        # اول یاهو با فیلتر (فقط اعداد بالای 1 دلار قبول هستند)
+        price = fetch_yahoo('TON-USD')
+        if price and price > 1:
+            return price
+        # اگر یاهو جواب نداد یا عدد اشتباه بود، از CoinGecko استفاده کن
+        try:
+            resp = requests.get('https://api.coingecko.com/api/v3/simple/price?ids=the-open-network&vs_currencies=usd', timeout=8)
+            data = resp.json()
+            if data.get('the-open-network'):
+                return float(data['the-open-network']['usd'])
+        except:
+            pass
+        return None
     elif symbol_key == 'btc':
         return fetch_yahoo('BTC-USD')
     elif symbol_key == 'eth':
         return fetch_yahoo('ETH-USD')
     elif symbol_key == 'bnb':
         return fetch_yahoo('BNB-USD')
-    elif symbol_key == 'gram':
-        return fetch_yahoo('TON-USD')
     elif symbol_key == 'xrp':
         return fetch_yahoo('XRP-USD')
     elif symbol_key == 'sol':
