@@ -1,29 +1,52 @@
 import os
 os.environ['TZ'] = 'UTC'
 import asyncio
-import time
 import sqlite3
 import requests
 import re
-from datetime import datetime
+import json
+import time
+from datetime import datetime, timedelta
 from curl_cffi import requests as cffi_requests
-from flask import Flask
+from flask import Flask, request
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
-from telegram.error import TimedOut, NetworkError
+from telegram.error import TimedOut, NetworkError, RetryAfter
 import logging
 import threading
+from functools import lru_cache
+from typing import Optional, Dict, List, Tuple
 
-# ======== تنظیمات از متغیرهای محیطی ========
+# ======== تنظیمات ========
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN environment variable not set!")
-CHAT_ID = os.environ.get('CHAT_ID', '483833953')
-INTERVAL = int(os.environ.get('INTERVAL', 60))  # ۱ دقیقه
-TIMEOUT = 30
-# =========================
 
-logging.basicConfig(level=logging.ERROR)
+INTERVAL = int(os.environ.get('INTERVAL', 60))
+TIMEOUT = 30
+MAX_RETRIES = 3
+CACHE_TTL = 30  # کش قیمت‌ها به مدت ۳۰ ثانیه
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# ======== کش قیمت‌ها ========
+price_cache: Dict[str, Tuple[float, float]] = {}  # symbol -> (price, timestamp)
+
+def get_cached_price(symbol: str) -> Optional[float]:
+    """دریافت قیمت از کش"""
+    if symbol in price_cache:
+        price, timestamp = price_cache[symbol]
+        if time.time() - timestamp < CACHE_TTL:
+            return price
+    return None
+
+def set_cached_price(symbol: str, price: float):
+    """ذخیره قیمت در کش"""
+    price_cache[symbol] = (price, time.time())
 
 # ======== دسته‌بندی نمادها ========
 CATEGORIES = {
@@ -42,8 +65,8 @@ CATEGORIES = {
             ('ltc', 'LTC', '⚡'),
             ('trx', 'TRX', '🔴'),
             ('dot', 'DOT', '🟣'),
-            ('usdt', 'USDT', '💵'),      # نام انگلیسی
-            ('aed', 'AED', '🇦🇪'),       # نام انگلیسی
+            ('usdt', 'USDT', '💵'),
+            ('aed', 'AED', '🇦🇪'),
         ]
     },
     'metals': {
@@ -72,8 +95,9 @@ CATEGORIES = {
     }
 }
 
-# ======== دریافت قیمت‌های تومانی از tgju.org ========
-def fetch_tgju_price(symbol_key):
+# ======== دریافت قیمت‌ها با بهینه‌سازی ========
+def fetch_tgju_price(symbol_key: str) -> Optional[int]:
+    """دریافت قیمت تومانی از tgju.org"""
     try:
         resp = requests.get('https://www.tgju.org/', timeout=10)
         html = resp.text
@@ -86,37 +110,43 @@ def fetch_tgju_price(symbol_key):
         if pattern:
             match = re.search(pattern, html, re.DOTALL | re.IGNORECASE)
             if match:
-                price_str = match.group(1).replace(',', '')
-                return int(price_str)
-        # روش‌های جایگزین برای درهم و تتر
+                return int(match.group(1).replace(',', ''))
+        
+        # روش‌های جایگزین
         if symbol_key == 'aed':
-            usd_price = fetch_tgju_price('usd')
-            if usd_price:
-                return int(usd_price / 3.6725)
+            usd = fetch_tgju_price('usd')
+            return int(usd / 3.6725) if usd else None
         if symbol_key == 'usdt':
-            usd_price = fetch_tgju_price('usd')
-            if usd_price:
-                return usd_price
+            return fetch_tgju_price('usd')
         return None
-    except:
+    except Exception as e:
+        logger.error(f"Error fetching tgju price for {symbol_key}: {e}")
         return None
 
-def fetch_usd_price():
-    return fetch_tgju_price('usd')
-
-# ======== دریافت قیمت از یاهو ========
-def fetch_yahoo(symbol):
+def fetch_yahoo(symbol: str) -> Optional[float]:
+    """دریافت قیمت از یاهو با کش"""
+    cached = get_cached_price(symbol)
+    if cached:
+        return cached
+    
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1h&range=1d"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"}
-    try:
-        resp = cffi_requests.get(url, headers=headers, impersonate="chrome120", timeout=10)
-        data = resp.json()
-        price = data['chart']['result'][0]['indicators']['quote'][0]['close'][-1]
-        return float(price) if price is not None else None
-    except:
-        return None
+    
+    for attempt in range(MAX_RETRIES):
+        try:
+            resp = cffi_requests.get(url, headers=headers, impersonate="chrome120", timeout=10)
+            data = resp.json()
+            price = data['chart']['result'][0]['indicators']['quote'][0]['close'][-1]
+            if price is not None:
+                set_cached_price(symbol, float(price))
+                return float(price)
+        except Exception as e:
+            logger.warning(f"Yahoo fetch attempt {attempt+1} failed for {symbol}: {e}")
+            time.sleep(1)
+    return None
 
-def fetch_twelve(symbol):
+def fetch_twelve(symbol: str) -> Optional[float]:
+    """دریافت قیمت از Twelve Data"""
     url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey=f8f6fe94d43b454ba0c9431ff529c466"
     try:
         resp = requests.get(url, timeout=10)
@@ -125,7 +155,8 @@ def fetch_twelve(symbol):
     except:
         return None
 
-def fetch_coingecko(symbol):
+def fetch_coingecko(symbol: str) -> Optional[float]:
+    """دریافت قیمت از CoinGecko"""
     url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbol}&vs_currencies=usd"
     try:
         resp = requests.get(url, timeout=10)
@@ -134,81 +165,76 @@ def fetch_coingecko(symbol):
     except:
         return None
 
-# ======== دریافت قیمت ========
-def get_price(symbol_key):
+def get_price(symbol_key: str) -> Optional[float]:
+    """دریافت قیمت با fallback"""
     if symbol_key in ('usd', 'aed', 'usdt'):
         return fetch_tgju_price(symbol_key)
-    if symbol_key == 'btc':
-        return fetch_yahoo('BTC-USD') or fetch_twelve('BTC/USD')
-    elif symbol_key == 'eth':
-        return fetch_yahoo('ETH-USD') or fetch_twelve('ETH/USD')
-    elif symbol_key == 'bnb':
-        return fetch_yahoo('BNB-USD') or fetch_twelve('BNB/USD')
-    elif symbol_key == 'gram':
-        return fetch_coingecko('the-open-network') or fetch_twelve('TON/USD')
-    elif symbol_key == 'xrp':
-        return fetch_yahoo('XRP-USD') or fetch_twelve('XRP/USD')
-    elif symbol_key == 'sol':
-        return fetch_yahoo('SOL-USD') or fetch_twelve('SOL/USD')
-    elif symbol_key == 'doge':
-        return fetch_yahoo('DOGE-USD') or fetch_twelve('DOGE/USD')
-    elif symbol_key == 'bch':
-        return fetch_yahoo('BCH-USD') or fetch_twelve('BCH/USD')
-    elif symbol_key == 'ltc':
-        return fetch_yahoo('LTC-USD') or fetch_twelve('LTC/USD')
-    elif symbol_key == 'trx':
-        return fetch_yahoo('TRX-USD') or fetch_twelve('TRX/USD')
-    elif symbol_key == 'dot':
-        return fetch_yahoo('DOT-USD') or fetch_twelve('DOT/USD')
-    elif symbol_key == 'gold':
-        return fetch_yahoo('GC=F')
-    elif symbol_key == 'silver':
-        return fetch_yahoo('SI=F')
-    elif symbol_key == 'oil':
-        return fetch_yahoo('CL=F')
-    elif symbol_key == 'brent':
-        return fetch_yahoo('BZ=F')
-    elif symbol_key == 'gas':
-        return fetch_yahoo('NG=F')
-    elif symbol_key == 'sugar':
-        price = fetch_yahoo('SB=F')
-        return round(price / 100, 4) if price else None
-    return None
+    
+    # مپ نمادها به توابع دریافت
+    price_map = {
+        'btc': lambda: fetch_yahoo('BTC-USD') or fetch_twelve('BTC/USD'),
+        'eth': lambda: fetch_yahoo('ETH-USD') or fetch_twelve('ETH/USD'),
+        'bnb': lambda: fetch_yahoo('BNB-USD') or fetch_twelve('BNB/USD'),
+        'gram': lambda: fetch_coingecko('the-open-network') or fetch_twelve('TON/USD'),
+        'xrp': lambda: fetch_yahoo('XRP-USD') or fetch_twelve('XRP/USD'),
+        'sol': lambda: fetch_yahoo('SOL-USD') or fetch_twelve('SOL/USD'),
+        'doge': lambda: fetch_yahoo('DOGE-USD') or fetch_twelve('DOGE/USD'),
+        'bch': lambda: fetch_yahoo('BCH-USD') or fetch_twelve('BCH/USD'),
+        'ltc': lambda: fetch_yahoo('LTC-USD') or fetch_twelve('LTC/USD'),
+        'trx': lambda: fetch_yahoo('TRX-USD') or fetch_twelve('TRX/USD'),
+        'dot': lambda: fetch_yahoo('DOT-USD') or fetch_twelve('DOT/USD'),
+        'gold': lambda: fetch_yahoo('GC=F'),
+        'silver': lambda: fetch_yahoo('SI=F'),
+        'oil': lambda: fetch_yahoo('CL=F'),
+        'brent': lambda: fetch_yahoo('BZ=F'),
+        'gas': lambda: fetch_yahoo('NG=F'),
+        'sugar': lambda: (lambda p: round(p/100, 4) if p else None)(fetch_yahoo('SB=F')),
+    }
+    
+    func = price_map.get(symbol_key)
+    return func() if func else None
 
-def is_market_open(symbol_key):
+def is_market_open(symbol_key: str) -> bool:
+    """بررسی باز بودن بازار"""
     now = datetime.now()
     today = now.weekday()
+    
+    # ارزهای دیجیتال همیشه باز
     if symbol_key in ['btc', 'eth', 'bnb', 'gram', 'xrp', 'sol', 'doge', 'bch', 'ltc', 'trx', 'dot', 'usdt', 'aed']:
         return True
-    if today == 6:
+    
+    if today == 6:  # شنبه
         return False
+    
+    # شکر: ساعت ۱۲ تا ۲۱:۳۰ به وقت ایران
     if symbol_key == 'sugar':
         iran_hour = (now.hour + 3) % 24
         iran_minute = now.minute + 30
         if iran_minute >= 60:
             iran_hour = (iran_hour + 1) % 24
             iran_minute -= 60
-        if iran_hour >= 12 and (iran_hour < 21 or (iran_hour == 21 and iran_minute <= 30)):
-            return True
-        return False
+        return 12 <= iran_hour <= 21 and not (iran_hour == 21 and iran_minute > 30)
+    
     return True
 
 # ======== دیتابیس ========
 DB_PATH = "market_data.db"
 
 def init_db():
+    """مقداردهی اولیه دیتابیس"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS prices
-                 (symbol TEXT, timestamp TEXT, price REAL, PRIMARY KEY (symbol, timestamp))''')
-    c.execute('''CREATE TABLE IF NOT EXISTS history
-                 (symbol TEXT, timestamp TEXT, price REAL)''')
+                 (symbol TEXT, timestamp TEXT, price REAL, 
+                  PRIMARY KEY (symbol, timestamp))''')
     c.execute('''CREATE TABLE IF NOT EXISTS user_selections
-                 (user_id INTEGER, symbol TEXT, PRIMARY KEY (user_id, symbol))''')
+                 (user_id INTEGER, symbol TEXT, 
+                  PRIMARY KEY (user_id, symbol))''')
     conn.commit()
     conn.close()
 
-def save_price(symbol, price):
+def save_price(symbol: str, price: float):
+    """ذخیره قیمت در دیتابیس"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('INSERT INTO prices (symbol, timestamp, price) VALUES (?, ?, ?)',
@@ -216,7 +242,8 @@ def save_price(symbol, price):
     conn.commit()
     conn.close()
 
-def get_last_price(symbol):
+def get_last_price(symbol: str) -> Optional[float]:
+    """دریافت آخرین قیمت از دیتابیس"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('SELECT price FROM prices WHERE symbol=? ORDER BY timestamp DESC LIMIT 1', (symbol,))
@@ -224,7 +251,8 @@ def get_last_price(symbol):
     conn.close()
     return row[0] if row else None
 
-def get_user_selections(user_id):
+def get_user_selections(user_id: int) -> List[str]:
+    """دریافت نمادهای انتخاب‌شده توسط کاربر"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('SELECT symbol FROM user_selections WHERE user_id=?', (user_id,))
@@ -232,28 +260,28 @@ def get_user_selections(user_id):
     conn.close()
     return [row[0] for row in rows]
 
-def save_user_selection(user_id, symbol):
+def save_user_selection(user_id: int, symbol: str):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('INSERT OR IGNORE INTO user_selections (user_id, symbol) VALUES (?, ?)', (user_id, symbol))
     conn.commit()
     conn.close()
 
-def remove_user_selection(user_id, symbol):
+def remove_user_selection(user_id: int, symbol: str):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('DELETE FROM user_selections WHERE user_id=? AND symbol=?', (user_id, symbol))
     conn.commit()
     conn.close()
 
-def clear_user_selections(user_id):
+def clear_user_selections(user_id: int):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('DELETE FROM user_selections WHERE user_id=?', (user_id,))
     conn.commit()
     conn.close()
 
-def select_all_symbols(user_id):
+def select_all_symbols(user_id: int):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('DELETE FROM user_selections WHERE user_id=?', (user_id,))
@@ -264,30 +292,27 @@ def select_all_symbols(user_id):
     conn.close()
 
 # ======== توابع ربات ========
-sending_active = {}
-last_sent_summary = {}
+sending_active: Dict[int, bool] = {}
+last_sent_summary: Dict[int, str] = {}
 
-def get_all_symbols():
+def get_all_symbols() -> List[Tuple[str, str, str]]:
     all_symbols = []
     for category in CATEGORIES.values():
         all_symbols.extend(category['symbols'])
     return all_symbols
 
-def get_unit(symbol_key):
-    if symbol_key in ('aed', 'usdt', 'usd'):
-        return 'تومان'
-    return '$'
+def get_unit(symbol_key: str) -> str:
+    return 'تومان' if symbol_key in ('aed', 'usdt', 'usd') else '$'
 
-def format_price(symbol_key, price):
+def format_price(symbol_key: str, price: Optional[float]) -> str:
     if price is None:
         return '⛔ در دسترس نیست'
     unit = get_unit(symbol_key)
     if unit == 'تومان':
         return f"{int(price):,} {unit}"
-    else:
-        return f"${price:.4f}"
+    return f"${price:.4f}"
 
-def format_change(old_price, new_price):
+def format_change(old_price: Optional[float], new_price: Optional[float]) -> str:
     if old_price is None or new_price is None:
         return "💰 قیمت اولیه"
     if abs(new_price - old_price) < 0.0001:
@@ -298,11 +323,8 @@ def format_change(old_price, new_price):
     arrow = "📈" if change > 0 else "📉"
     return f"{arrow} {change:+.2f}%"
 
-def generate_formatted_lines(selections=None):
-    """
-    تولید خطوط خروجی با دسته‌بندی.
-    اگر selections مشخص باشد، فقط نمادهای انتخابی نمایش داده می‌شوند.
-    """
+def generate_formatted_lines(selections: Optional[List[str]] = None) -> List[str]:
+    """تولید خطوط فرمت‌شده با دسته‌بندی"""
     lines = []
     for cat_key, cat in CATEGORIES.items():
         cat_symbols = cat['symbols']
@@ -310,105 +332,108 @@ def generate_formatted_lines(selections=None):
             cat_symbols = [(k, n, e) for k, n, e in cat['symbols'] if k in selections]
         if not cat_symbols:
             continue
+        
         lines.append(f"{cat['emoji']} {cat['name']}:")
         for key, name, emoji in cat_symbols:
             price = get_price(key)
             old_price = get_last_price(key)
             if price is not None:
                 save_price(key, price)
-            price_str = format_price(key, price) if price is not None else "⛔ در دسترس نیست"
-            change_str = format_change(old_price, price) if old_price is not None else "💰 قیمت اولیه"
+            
+            price_str = format_price(key, price)
+            change_str = format_change(old_price, price)
             market_status = " 🔒 بسته" if not is_market_open(key) else ""
             lines.append(f"{emoji} {name}: {price_str} {change_str}{market_status}")
         lines.append("")
+    
     if lines and lines[-1] == "":
         lines.pop()
     return lines
 
-async def send_message(chat_id, text, parse_mode='Markdown', reply_markup=None):
+async def send_message(chat_id: int, text: str, parse_mode: str = 'Markdown', reply_markup=None):
+    """ارسال پیام با تلاش مجدد"""
     bot = Bot(token=TELEGRAM_TOKEN)
-    await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, reply_markup=reply_markup)
+    for attempt in range(MAX_RETRIES):
+        try:
+            await bot.send_message(
+                chat_id=chat_id, 
+                text=text, 
+                parse_mode=parse_mode, 
+                reply_markup=reply_markup,
+                disable_web_page_preview=True
+            )
+            return
+        except (TimedOut, NetworkError, RetryAfter) as e:
+            wait_time = 2 ** attempt
+            logger.warning(f"Send failed, retrying in {wait_time}s: {e}")
+            await asyncio.sleep(wait_time)
+        except Exception as e:
+            logger.error(f"Send failed: {e}")
+            return
 
-async def show_main_menu(chat_id, user_id):
-    text = "📊 **به ربات قیمت‌های لحظه‌ای خوش آمدید!**\n\n"
-    text += "لطفاً یک دسته را انتخاب کنید:\n"
-    keyboard = []
-    for cat_key, cat in CATEGORIES.items():
-        keyboard.append([InlineKeyboardButton(f"{cat['emoji']} {cat['name']}", callback_data=f"cat_{cat_key}")])
+# ======== منوها ========
+async def show_main_menu(chat_id: int, user_id: int):
+    text = "📊 **به ربات قیمت‌های لحظه‌ای خوش آمدید!**\n\nلطفاً یک دسته را انتخاب کنید:"
+    keyboard = [
+        [InlineKeyboardButton(f"{cat['emoji']} {cat['name']}", callback_data=f"cat_{cat_key}")]
+        for cat_key, cat in CATEGORIES.items()
+    ]
     keyboard.append([InlineKeyboardButton("📊 نمایش همه", callback_data="show_all")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await send_message(chat_id, text, parse_mode='Markdown', reply_markup=reply_markup)
+    await send_message(chat_id, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def show_category_symbols(chat_id, user_id, category_key):
+async def show_category_symbols(chat_id: int, user_id: int, category_key: str):
     cat = CATEGORIES[category_key]
     selections = get_user_selections(user_id)
+    
     text = f"📊 **{cat['emoji']} {cat['name']}**\n\n"
     text += "✅ روی هر نماد کلیک کنید تا انتخاب/لغو شود.\n"
     text += "بعد از انتخاب، روی **شروع ارسال** کلیک کنید.\n\n"
     text += "**انتخاب‌شده:**\n"
-    selected = []
-    for key, name, emoji in cat['symbols']:
-        if key in selections:
-            selected.append(f"{emoji} {name}")
-    if selected:
-        text += "\n".join(selected)
-    else:
-        text += "هیچ نمادی انتخاب نشده است."
+    selected = [f"{emoji} {name}" for key, name, emoji in cat['symbols'] if key in selections]
+    text += "\n".join(selected) if selected else "هیچ نمادی انتخاب نشده است."
     
     keyboard = []
     for key, name, emoji in cat['symbols']:
         checked = "✅ " if key in selections else ""
         keyboard.append([InlineKeyboardButton(f"{checked}{emoji} {name}", callback_data=f"toggle_{key}")])
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت به دسته‌ها", callback_data="back_categories")])
-    keyboard.append([InlineKeyboardButton("📊 انتخاب همه", callback_data=f"select_all_cat_{category_key}")])
-    keyboard.append([InlineKeyboardButton("🚀 شروع ارسال", callback_data="start_sending")])
-    keyboard.append([InlineKeyboardButton("🛑 توقف ارسال", callback_data="stop_sending")])
-    keyboard.append([InlineKeyboardButton("🗑️ پاک کردن همه انتخاب‌ها", callback_data="clear_all")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await send_message(chat_id, text, parse_mode='Markdown', reply_markup=reply_markup)
+    
+    keyboard.extend([
+        [InlineKeyboardButton("🔙 بازگشت به دسته‌ها", callback_data="back_categories")],
+        [InlineKeyboardButton("📊 انتخاب همه", callback_data=f"select_all_cat_{category_key}")],
+        [InlineKeyboardButton("🚀 شروع ارسال", callback_data="start_sending")],
+        [InlineKeyboardButton("🛑 توقف ارسال", callback_data="stop_sending")],
+        [InlineKeyboardButton("🗑️ پاک کردن همه انتخاب‌ها", callback_data="clear_all")],
+    ])
+    await send_message(chat_id, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def show_all_symbols(chat_id, user_id):
+async def show_all_symbols_menu(chat_id: int, user_id: int):
     selections = get_user_selections(user_id)
     text = "📊 **همه نمادها**\n\n"
     text += "✅ روی هر نماد کلیک کنید تا انتخاب/لغو شود.\n"
     text += "بعد از انتخاب، روی **شروع ارسال** کلیک کنید.\n\n"
     text += "**انتخاب‌شده:**\n"
-    selected = []
-    for key, name, emoji in get_all_symbols():
-        if key in selections:
-            selected.append(f"{emoji} {name}")
-    if selected:
-        text += "\n".join(selected)
-    else:
-        text += "هیچ نمادی انتخاب نشده است."
+    selected = [f"{emoji} {name}" for key, name, emoji in get_all_symbols() if key in selections]
+    text += "\n".join(selected) if selected else "هیچ نمادی انتخاب نشده است."
     
     keyboard = []
     for key, name, emoji in get_all_symbols():
         checked = "✅ " if key in selections else ""
         keyboard.append([InlineKeyboardButton(f"{checked}{emoji} {name}", callback_data=f"toggle_{key}")])
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت به دسته‌ها", callback_data="back_categories")])
-    keyboard.append([InlineKeyboardButton("📊 انتخاب همه", callback_data="select_all")])
-    keyboard.append([InlineKeyboardButton("🚀 شروع ارسال", callback_data="start_sending")])
-    keyboard.append([InlineKeyboardButton("🛑 توقف ارسال", callback_data="stop_sending")])
-    keyboard.append([InlineKeyboardButton("🗑️ پاک کردن همه انتخاب‌ها", callback_data="clear_all")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await send_message(chat_id, text, parse_mode='Markdown', reply_markup=reply_markup)
-
-async def show_usd_price(chat_id):
-    price = fetch_usd_price()
-    if price:
-        text = f"💰 **قیمت دلار (بازار آزاد):**\n{price:,} تومان"
-    else:
-        text = "⛔ خطا در دریافت قیمت دلار."
-    await send_message(chat_id, text, parse_mode='Markdown')
+    
+    keyboard.extend([
+        [InlineKeyboardButton("🔙 بازگشت به دسته‌ها", callback_data="back_categories")],
+        [InlineKeyboardButton("📊 انتخاب همه", callback_data="select_all")],
+        [InlineKeyboardButton("🚀 شروع ارسال", callback_data="start_sending")],
+        [InlineKeyboardButton("🛑 توقف ارسال", callback_data="stop_sending")],
+        [InlineKeyboardButton("🗑️ پاک کردن همه انتخاب‌ها", callback_data="clear_all")],
+    ])
+    await send_message(chat_id, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 # ======== دستورات ربات ========
-async def start(update, context):
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    await show_main_menu(chat_id, user_id)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await show_main_menu(update.effective_chat.id, update.effective_user.id)
 
-async def button_handler(update, context):
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
@@ -428,16 +453,15 @@ async def button_handler(update, context):
     if data == "select_all":
         select_all_symbols(user_id)
         await query.edit_message_text("📊 همه نمادها انتخاب شدند.")
-        await show_all_symbols(chat_id, user_id)
+        await show_all_symbols_menu(chat_id, user_id)
         return
     
     if data == "show_all":
-        await show_all_symbols(chat_id, user_id)
+        await show_all_symbols_menu(chat_id, user_id)
         return
     
     if data.startswith("cat_"):
-        category_key = data.replace("cat_", "")
-        await show_category_symbols(chat_id, user_id, category_key)
+        await show_category_symbols(chat_id, user_id, data.replace("cat_", ""))
         return
     
     if data.startswith("select_all_cat_"):
@@ -452,7 +476,10 @@ async def button_handler(update, context):
     if data == "start_sending":
         selections = get_user_selections(user_id)
         if not selections:
-            await query.edit_message_text("⚠️ حداقل یک نماد انتخاب کنید.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_categories")]]))
+            await query.edit_message_text(
+                "⚠️ حداقل یک نماد انتخاب کنید.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_categories")]])
+            )
             return
         sending_active[user_id] = True
         last_sent_summary[user_id] = ""
@@ -471,53 +498,48 @@ async def button_handler(update, context):
             remove_user_selection(user_id, symbol)
         else:
             save_user_selection(user_id, symbol)
-        await show_all_symbols(chat_id, user_id)
+        await show_all_symbols_menu(chat_id, user_id)
         return
 
-async def status_single(update, symbol_key, name, emoji):
+async def status_single(update: Update, symbol_key: str, name: str, emoji: str):
     chat_id = update.effective_chat.id
     price = get_price(symbol_key)
     if price is None:
         await send_message(chat_id, f"{emoji} {name}: ⛔ در دسترس نیست.")
         return
+    
     old_price = get_last_price(symbol_key)
     save_price(symbol_key, price)
     price_str = format_price(symbol_key, price)
-    change_str = format_change(old_price, price) if old_price is not None else "💰 قیمت اولیه"
+    change_str = format_change(old_price, price)
     market_status = " 🔒 بسته" if not is_market_open(symbol_key) else ""
     await send_message(chat_id, f"{emoji} **{name}**\n💰 قیمت: {price_str}\n{change_str}{market_status}", parse_mode='Markdown')
 
-# ======== دستورات متنی ========
-async def gold(update, context): await status_single(update, 'gold', 'GOLD', '🏆')
-async def silver(update, context): await status_single(update, 'silver', 'SILVER', '🥈')
-async def btc(update, context): await status_single(update, 'btc', 'BTC', '₿')
-async def eth(update, context): await status_single(update, 'eth', 'ETH', '💎')
-async def bnb(update, context): await status_single(update, 'bnb', 'BNB', '🟡')
-async def gram(update, context): await status_single(update, 'gram', 'GRAM', '🔷')
-async def xrp(update, context): await status_single(update, 'xrp', 'XRP', '💠')
-async def sol(update, context): await status_single(update, 'sol', 'SOL', '☀️')
-async def doge(update, context): await status_single(update, 'doge', 'DOGE', '🐕')
-async def bch(update, context): await status_single(update, 'bch', 'BCH', '🔶')
-async def ltc(update, context): await status_single(update, 'ltc', 'LTC', '⚡')
-async def trx(update, context): await status_single(update, 'trx', 'TRX', '🔴')
-async def dot(update, context): await status_single(update, 'dot', 'DOT', '🟣')
-async def usdt(update, context): await status_single(update, 'usdt', 'USDT', '💵')
-async def aed(update, context): await status_single(update, 'aed', 'AED', '🇦🇪')
-async def oil(update, context): await status_single(update, 'oil', 'OIL', '🛢️')
-async def brent(update, context): await status_single(update, 'brent', 'BRENT', '🛢️')
-async def gas(update, context): await status_single(update, 'gas', 'GAS', '🔥')
-async def sugar(update, context): await status_single(update, 'sugar', 'SUGAR', '🍬')
-async def usd(update, context):
-    chat_id = update.effective_chat.id
-    await show_usd_price(chat_id)
+# ======== تعریف دستورات ========
+commands = [
+    ('gold', 'GOLD', '🏆'), ('silver', 'SILVER', '🥈'),
+    ('btc', 'BTC', '₿'), ('eth', 'ETH', '💎'), ('bnb', 'BNB', '🟡'),
+    ('gram', 'GRAM', '🔷'), ('xrp', 'XRP', '💠'), ('sol', 'SOL', '☀️'),
+    ('doge', 'DOGE', '🐕'), ('bch', 'BCH', '🔶'), ('ltc', 'LTC', '⚡'),
+    ('trx', 'TRX', '🔴'), ('dot', 'DOT', '🟣'),
+    ('usdt', 'USDT', '💵'), ('aed', 'AED', '🇦🇪'),
+    ('oil', 'OIL', '🛢️'), ('brent', 'BRENT', '🛢️'), ('gas', 'GAS', '🔥'),
+    ('sugar', 'SUGAR', '🍬'),
+]
 
-async def all_status(update, context):
+async def all_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     lines = generate_formatted_lines()
     text = "📊 **خلاصه قیمت‌ها**\n━━━━━━━━━━━━━━━━━━━\n" + "\n".join(lines)
-    await send_message(chat_id, text, parse_mode='Markdown')
+    await send_message(chat_id, text)
 
-async def status_cmd(update, context):
+async def usd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    price = fetch_tgju_price('usd')
+    text = f"💰 **قیمت دلار (بازار آزاد):**\n{price:,} تومان" if price else "⛔ خطا در دریافت قیمت دلار."
+    await send_message(chat_id, text)
+
+async def status_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     report = "📊 **وضعیت دیتابیس**\n"
     for key, name, emoji in get_all_symbols():
@@ -525,7 +547,7 @@ async def status_cmd(update, context):
         report += f"🔹 {name}: {price if price else 'ندارد'}\n"
     await send_message(chat_id, report)
 
-async def help_command(update, context):
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     await send_message(chat_id,
         "📋 **دستورات:**\n"
@@ -539,66 +561,59 @@ async def help_command(update, context):
 
 # ======== حلقه خودکار ========
 async def auto_send_loop():
+    """حلقه ارسال خودکار قیمت‌ها"""
     bot = Bot(token=TELEGRAM_TOKEN)
+    logger.info("🔄 Auto-send loop started")
+    
     while True:
         try:
             for user_id in list(sending_active.keys()):
                 if not sending_active.get(user_id, False):
                     continue
+                
                 selections = get_user_selections(user_id)
                 if not selections:
                     sending_active[user_id] = False
                     continue
+                
                 lines = generate_formatted_lines(selections)
                 summary = "\n".join(lines)
+                
                 if summary and summary != last_sent_summary.get(user_id, ""):
-                    await bot.send_message(
-                        user_id,
-                        f"🔔 **به‌روزرسانی قیمت‌ها**\n━━━━━━━━━━━━━━━━━━━\n{summary}",
-                        parse_mode='Markdown'
-                    )
-                    last_sent_summary[user_id] = summary
+                    try:
+                        await bot.send_message(
+                            user_id,
+                            f"🔔 **به‌روزرسانی قیمت‌ها**\n━━━━━━━━━━━━━━━━━━━\n{summary}",
+                            parse_mode='Markdown'
+                        )
+                        last_sent_summary[user_id] = summary
+                    except Exception as e:
+                        logger.error(f"Error sending to user {user_id}: {e}")
+            
             await asyncio.sleep(INTERVAL)
         except Exception as e:
-            print(f"⚠️ خطا در حلقه خودکار: {e}")
+            logger.error(f"Error in auto-send loop: {e}")
             await asyncio.sleep(INTERVAL)
 
-def start_auto_send():
-    asyncio.run(auto_send_loop())
-
-# ======== اجرای ربات ========
-def run_bot_in_main_thread():
-    app = Application.builder().token(TELEGRAM_TOKEN).connect_timeout(TIMEOUT).read_timeout(TIMEOUT).build()
+# ======== راه‌اندازی ربات ========
+def setup_handlers(app: Application):
+    """تنظیم هندلرهای ربات"""
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("gold", gold))
-    app.add_handler(CommandHandler("silver", silver))
-    app.add_handler(CommandHandler("btc", btc))
-    app.add_handler(CommandHandler("eth", eth))
-    app.add_handler(CommandHandler("bnb", bnb))
-    app.add_handler(CommandHandler("gram", gram))
-    app.add_handler(CommandHandler("xrp", xrp))
-    app.add_handler(CommandHandler("sol", sol))
-    app.add_handler(CommandHandler("doge", doge))
-    app.add_handler(CommandHandler("bch", bch))
-    app.add_handler(CommandHandler("ltc", ltc))
-    app.add_handler(CommandHandler("trx", trx))
-    app.add_handler(CommandHandler("dot", dot))
-    app.add_handler(CommandHandler("usdt", usdt))
-    app.add_handler(CommandHandler("aed", aed))
-    app.add_handler(CommandHandler("oil", oil))
-    app.add_handler(CommandHandler("brent", brent))
-    app.add_handler(CommandHandler("gas", gas))
-    app.add_handler(CommandHandler("sugar", sugar))
-    app.add_handler(CommandHandler("usd", usd))
     app.add_handler(CommandHandler("all", all_status))
-    app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("status", status_db))
+    app.add_handler(CommandHandler("usd", usd_price))
     app.add_handler(CallbackQueryHandler(button_handler))
-    print("🤖 ربات در حال اجرا...")
-    app.run_polling()
+    
+    # اضافه کردن دستورات تکی
+    for cmd, name, emoji in commands:
+        async def handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE, cmd=cmd, name=name, emoji=emoji):
+            await status_single(update, cmd, name, emoji)
+        app.add_handler(CommandHandler(cmd, handler))
 
 # ======== وب‌سرور Flask ========
 flask_app = Flask(__name__)
+application = None
 
 @flask_app.route('/')
 def home():
@@ -608,15 +623,84 @@ def home():
 def health():
     return "OK"
 
+@flask_app.route('/webhook', methods=['POST'])
+async def webhook():
+    """Webhook endpoint برای دریافت آپدیت‌ها"""
+    if request.headers.get('content-type') == 'application/json':
+        try:
+            update_data = request.get_json(force=True)
+            if application:
+                update = Update.de_json(update_data, application.bot)
+                await application.process_update(update)
+            return "OK", 200
+        except Exception as e:
+            logger.error(f"Webhook error: {e}")
+            return "Error", 500
+    return "Unsupported", 400
+
 def run_flask():
     port = int(os.environ.get('PORT', 10000))
-    flask_app.run(host='0.0.0.0', port=port)
+    flask_app.run(host='0.0.0.0', port=port, debug=False)
+
+async def setup_webhook():
+    """تنظیم Webhook به جای Polling"""
+    bot = Bot(token=TELEGRAM_TOKEN)
+    webhook_url = f"https://crypfx-bot-2.onrender.com/webhook"
+    try:
+        await bot.set_webhook(webhook_url, drop_pending_updates=True)
+        logger.info(f"✅ Webhook set to: {webhook_url}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Failed to set webhook: {e}")
+        return False
+
+def run_bot():
+    """اجرای اصلی ربات"""
+    global application
+    
+    logger.info("🚀 Starting bot...")
+    
+    # ایجاد Application
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    setup_handlers(application)
+    
+    # انتخاب بین Webhook و Polling
+    use_webhook = os.environ.get('USE_WEBHOOK', 'true').lower() == 'true'
+    
+    if use_webhook:
+        # استفاده از Webhook
+        asyncio.run(setup_webhook())
+        logger.info("🤖 Bot running with webhook")
+        # Flask در ترد جداگانه اجرا می‌شود
+    else:
+        # استفاده از Polling
+        logger.info("🤖 Bot running with polling")
+        application.run_polling(
+            drop_pending_updates=True,
+            poll_interval=1.0,
+            timeout=30
+        )
 
 # ======== اجرای اصلی ========
 if __name__ == '__main__':
     init_db()
+    logger.info("📊 Database initialized")
+    
+    # اجرای Flask در ترد جداگانه
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    auto_thread = threading.Thread(target=start_auto_send, daemon=True)
+    logger.info("🌐 Flask server started")
+    
+    # اجرای حلقه خودکار
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    auto_thread = threading.Thread(
+        target=lambda: loop.run_until_complete(auto_send_loop()),
+        daemon=True
+    )
     auto_thread.start()
-    run_bot_in_main_thread()
+    logger.info("🔄 Auto-send loop started")
+    
+    # اجرای ربات
+    run_bot()
