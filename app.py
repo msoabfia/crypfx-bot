@@ -144,7 +144,6 @@ def fetch_coingecko(symbol):
     except:
         return None
 
-# ======== دریافت قیمت اصلی ========
 def get_price(symbol_key):
     if not is_market_open(symbol_key):
         return None
@@ -471,7 +470,7 @@ async def button_handler(update, context):
             return
         sending_active[user_id] = True
         last_sent_summary[user_id] = ""
-        await query.edit_message_text("🚀 **ارسال خودکار شروع شد!**\nهر ۱ دقیقه قیمت‌های انتخاب‌شده ارسال می‌شود.", parse_mode='Markdown')
+        await query.edit_message_text("🚀 **ارسال خودکار شروع شد!**\nهر １ دقیقه قیمت‌های انتخاب‌شده ارسال می‌شود.", parse_mode='Markdown')
         return
     if data == "stop_sending":
         sending_active[user_id] = False
@@ -562,7 +561,7 @@ async def help_command(update, context):
 async def send_startup_message():
     try:
         bot = Bot(token=TELEGRAM_TOKEN)
-        await asyncio.sleep(5)  # صبر بیشتر برای اطمینان از اتصال
+        await asyncio.sleep(5)
         await bot.send_message(
             chat_id=CHAT_ID,
             text="✅ **ربات با موفقیت به‌روزرسانی شد!**\n"
@@ -579,7 +578,6 @@ async def send_startup_message():
 
 # ======== اجرای ربات (در ترد اصلی) ========
 def run_bot_in_main_thread():
-    """اجرای ربات در ترد اصلی با signal_handlers=False"""
     app = Application.builder().token(TELEGRAM_TOKEN).connect_timeout(TIMEOUT).read_timeout(TIMEOUT).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
@@ -605,8 +603,8 @@ def run_bot_in_main_thread():
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CallbackQueryHandler(button_handler))
     print("🤖 ربات در حال اجرا (Main Thread)...")
-    # signal_handlers=False برای جلوگیری از خطای set_wakeup_fd
-    app.run_polling(signal_handlers=False)
+    # حذف signal_handlers=False
+    app.run_polling()
 
 # ======== اجرای Flask در ترد جداگانه ========
 def run_flask():
@@ -655,16 +653,14 @@ def start_auto_send():
 if __name__ == '__main__':
     init_db()
 
-    # Flask را در یک ترد جداگانه اجرا کن
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     print("✅ Flask در ترد جداگانه اجرا شد.")
 
-    # حلقه خودکار را در یک ترد جداگانه اجرا کن
     auto_thread = threading.Thread(target=start_auto_send, daemon=True)
     auto_thread.start()
     print("✅ حلقه خودکار در ترد جداگانه اجرا شد.")
 
-    # ربات را در ترد اصلی اجرا کن (با signal_handlers=False)
-    # این کار از خطای set_wakeup_fd جلوگیری می‌کند
+    asyncio.run(send_startup_message())
+
     run_bot_in_main_thread()
