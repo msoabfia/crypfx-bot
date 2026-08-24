@@ -5,13 +5,13 @@ import time
 import sqlite3
 import requests
 import re
+import logging
 from datetime import datetime
 from curl_cffi import requests as cffi_requests
 from flask import Flask
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from telegram.error import TimedOut, NetworkError
-import logging
 import threading
 
 # ======== تنظیمات ========
@@ -77,46 +77,46 @@ CATEGORIES = {
     }
 }
 
-# ======== دریافت قیمت دلار (اول tgju، سپس نوبیتکس) ========
+# ======== دریافت قیمت دلار با لاگ کامل ========
 def fetch_usd_price():
-    # منبع اول: tgju.org
-    try:
-        resp = requests.get('https://www.tgju.org/', timeout=10)
-        # الگوی جدید برای دریافت قیمت دلار (با دقت بیشتر)
-        match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
-        if match:
-            price = match.group(1).replace(',', '')
-            return int(price)
-    except:
-        pass
-    
-    # منبع دوم: نوبیتکس (قیمت تتر به تومان)
+    # منبع اول: نوبیتکس (با کلید صحیح)
     try:
         resp = requests.get('https://api.nobitex.ir/market/stats?srcCurrency=usdt&dstCurrency=rls', timeout=10)
         data = resp.json()
-        price = data['stats']['USDT-IRT']['bestSell']
+        price = data['stats']['usdt-rls']['bestSell']
         if price:
             return int(float(price))
-    except:
-        pass
+    except Exception as e:
+        logging.error(f"❌ Nobitex fetch failed: {e}")
     
-    return 202000  # مقدار پیش‌فرض (مطابق با قیمت‌های روز)
-
-# ======== دریافت قیمت تتر ========
-def fetch_usdt_price():
-    usd_price = fetch_usd_price()
-    if usd_price:
-        return usd_price
+    # منبع دوم: tgju.org (با ساختار جدید)
+    try:
+        resp = requests.get('https://www.tgju.org/', timeout=10)
+        # بررسی وجود قیمت در ساختار جدید جدول
+        if 'price-last' in resp.text:
+            match = re.search(r'price-last">([\d,]+)</span>', resp.text)
+        else:
+            match = re.search(r'data-value="([\d,]+)"', resp.text)
+        if match:
+            price = match.group(1).replace(',', '')
+            return int(price)
+    except Exception as e:
+        logging.error(f"❌ Tgju fetch failed: {e}")
+    
+    # مقدار بازگشتی: None به جای عدد ثابت
     return None
 
-# ======== دریافت قیمت درهم ========
+def fetch_usdt_price():
+    usd_price = fetch_usd_price()
+    return usd_price
+
 def fetch_aed_price():
     usd_price = fetch_usd_price()
-    if not usd_price:
-        return None
-    return int(usd_price / 3.67)
+    if usd_price:
+        return int(usd_price / 3.67)
+    return None
 
-# ======== دریافت قیمت ========
+# ======== دریافت قیمت با لاگ کامل ========
 def fetch_yahoo(symbol):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1h&range=1d"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"}
@@ -125,7 +125,8 @@ def fetch_yahoo(symbol):
         data = resp.json()
         price = data['chart']['result'][0]['indicators']['quote'][0]['close'][-1]
         return float(price) if price is not None else None
-    except:
+    except Exception as e:
+        logging.error(f"❌ Yahoo fetch failed for {symbol}: {e}")
         return None
 
 def fetch_twelve(symbol):
@@ -133,21 +134,30 @@ def fetch_twelve(symbol):
     try:
         resp = requests.get(url, timeout=10)
         data = resp.json()
-        return float(data['price']) if 'price' in data else None
-    except:
+        if 'price' in data:
+            return float(data['price'])
+        logging.error(f"⚠️ TwelveData error for {symbol}: {data}")
+        return None
+    except Exception as e:
+        logging.error(f"❌ TwelveData request failed for {symbol}: {e}")
         return None
 
 def fetch_coingecko(symbol):
     url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbol}&vs_currencies=usd"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"}
     try:
-        resp = requests.get(url, timeout=10)
+        resp = requests.get(url, headers=headers, timeout=10)
         data = resp.json()
-        return float(data[symbol]['usd'])
-    except:
+        if symbol in data:
+            return float(data[symbol]['usd'])
+        logging.error(f"⚠️ CoinGecko error for {symbol}: {data}")
+        return None
+    except Exception as e:
+        logging.error(f"❌ CoinGecko request failed for {symbol}: {e}")
         return None
 
+# ======== دریافت قیمت اصلی ========
 def get_price(symbol_key):
-    """دریافت قیمت جدید (اگر بازار باز باشد)"""
     if not is_market_open(symbol_key):
         return None
 
@@ -343,7 +353,6 @@ def generate_price_message(selections):
                 else:
                     lines.append(f"{emoji} {name} : ⛔ در دسترس نیست")
                 continue
-
             formatted = format_price(new_price, key)
             change = None
             if old_price and old_price > 0:
@@ -580,7 +589,7 @@ async def auto_send_loop():
                     last_sent_summary[user_id] = message
             await asyncio.sleep(INTERVAL)
         except Exception as e:
-            print(f"⚠️ خطا در حلقه خودکار: {e}")
+            logging.error(f"❌ Auto-loop error: {e}")
             await asyncio.sleep(INTERVAL)
 
 def start_auto_send():
