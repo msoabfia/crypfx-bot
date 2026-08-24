@@ -25,11 +25,11 @@ TIMEOUT = 30
 
 logging.basicConfig(level=logging.ERROR)
 
-# ======== دسته‌بندی نمادها (با گروه جدید) ========
+# ======== دسته‌بندی نمادها ========
 CATEGORIES = {
     'fiat': {
-        'name': 'واحدهای پولی',
-        'emoji': '💱',
+        'name': 'واحد پولی(تومان)',
+        'emoji': '💳',
         'symbols': [
             ('usdt', 'USDT', '💵'),
             ('aed', 'AED', '🇦🇪'),
@@ -89,7 +89,7 @@ def fetch_usd_price():
         pass
     return 199900
 
-# ======== دریافت قیمت درهم (با نرخ واقعی) ========
+# ======== دریافت قیمت درهم ========
 def fetch_aed_price():
     usd_price = fetch_usd_price()
     if not usd_price:
@@ -137,8 +137,8 @@ def fetch_coingecko(symbol):
 def get_price(symbol_key):
     """دریافت قیمت جدید (اگر بازار باز باشد)"""
     if not is_market_open(symbol_key):
-        return None  # در زمان بسته بودن بازار، قیمت جدید دریافت نمی‌شود
-    
+        return None
+
     if symbol_key == 'usdt':
         return fetch_twelve('USDT/USD') or fetch_coingecko('tether') or 1.0
     elif symbol_key == 'aed':
@@ -150,7 +150,10 @@ def get_price(symbol_key):
     elif symbol_key == 'bnb':
         return fetch_yahoo('BNB-USD') or fetch_twelve('BNB/USD')
     elif symbol_key == 'gram':
-        return fetch_coingecko('the-open-network') or fetch_twelve('TON/USD')
+        price = fetch_twelve('TON/USD')
+        if price:
+            return price
+        return fetch_coingecko('the-open-network')
     elif symbol_key == 'xrp':
         return fetch_yahoo('XRP-USD') or fetch_twelve('XRP/USD')
     elif symbol_key == 'sol':
@@ -183,7 +186,7 @@ def is_market_open(symbol_key):
     today = now.weekday()
     if symbol_key in ['btc', 'eth', 'bnb', 'gram', 'xrp', 'sol', 'doge', 'bch', 'ltc', 'trx', 'dot', 'usdt', 'aed']:
         return True
-    if today == 6:  # یکشنبه
+    if today == 6:
         return False
     if symbol_key == 'sugar':
         iran_hour = (now.hour + 3) % 24
@@ -281,24 +284,15 @@ async def send_message(chat_id, text, parse_mode='Markdown', reply_markup=None):
     await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, reply_markup=reply_markup)
 
 def format_price(price, symbol_key):
+    """فرمت‌دهی قیمت: برای تتر و درهم فقط عدد (بدون تومان)، بقیه بدون واحد"""
     if price is None:
         return "⛔ در دسترس نیست"
-    if symbol_key == 'usdt':
-        usd_price = fetch_usd_price()
-        if usd_price:
-            return f"{price * usd_price:,.0f} تومان"
-        return f"{price:.4f} دلار"
-    elif symbol_key == 'aed':
-        return f"{price:,.0f} تومان"
-    # بقیه بدون واحد
+    if symbol_key in ['usdt', 'aed']:
+        return f"{price:,.0f}"
     if price < 0.001:
         return f"{price:.4e}"
     elif price < 1:
-        return f"{price:.7f}"
-    elif price < 10:
-        return f"{price:.4f}"
-    elif price < 100:
-        return f"{price:.2f}"
+        return f"{price:.6f}"
     else:
         return f"{price:,.2f}"
 
@@ -315,8 +309,7 @@ def format_change(change):
 def get_price_with_old(symbol_key):
     """دریافت قیمت جدید (اگر بازار باز باشد) و قیمت قبلی"""
     old_price = get_last_price(symbol_key)
-    new_price = get_price(symbol_key)  # اگر بازار بسته باشد، None برمی‌گرداند
-    
+    new_price = get_price(symbol_key)
     if new_price is not None:
         save_price(symbol_key, new_price)
     return new_price, old_price
@@ -331,7 +324,6 @@ def generate_price_message(selections):
         for key, name, emoji in cat_selected:
             new_price, old_price = get_price_with_old(key)
             if new_price is None:
-                # بازار بسته است → فقط آخرین قیمت را نمایش بده
                 last = get_last_price(key)
                 if last is not None:
                     formatted = format_price(last, key)
@@ -339,7 +331,7 @@ def generate_price_message(selections):
                 else:
                     lines.append(f"{emoji} {name} : ⛔ در دسترس نیست")
                 continue
-            
+
             formatted = format_price(new_price, key)
             change = None
             if old_price and old_price > 0:
@@ -378,7 +370,7 @@ async def show_category_symbols(chat_id, user_id, category_key):
         text += "\n".join(selected)
     else:
         text += "هیچ نمادی انتخاب نشده است."
-    
+
     keyboard = []
     for key, name, emoji in cat['symbols']:
         checked = "✅ " if key in selections else ""
@@ -405,7 +397,7 @@ async def show_all_symbols(chat_id, user_id):
         text += "\n".join(selected)
     else:
         text += "هیچ نمادی انتخاب نشده است."
-    
+
     keyboard = []
     for key, name, emoji in get_all_symbols():
         checked = "✅ " if key in selections else ""
@@ -429,7 +421,7 @@ async def button_handler(update, context):
     user_id = query.from_user.id
     chat_id = query.message.chat.id
     data = query.data
-    
+
     if data == "back_categories":
         await show_main_menu(chat_id, user_id)
         return
@@ -487,9 +479,8 @@ async def button_handler(update, context):
 async def status_single(update, symbol_key, name, emoji):
     chat_id = update.effective_chat.id
     new_price, old_price = get_price_with_old(symbol_key)
-    
+
     if new_price is None:
-        # بازار بسته است
         last = get_last_price(symbol_key)
         if last is not None:
             formatted = format_price(last, symbol_key)
@@ -497,7 +488,7 @@ async def status_single(update, symbol_key, name, emoji):
         else:
             await send_message(chat_id, f"{emoji} {name}: ⛔ در دسترس نیست.")
         return
-    
+
     formatted = format_price(new_price, symbol_key)
     change = None
     if old_price and old_price > 0:
@@ -627,11 +618,11 @@ def run_flask():
 
 if __name__ == '__main__':
     init_db()
-    
+
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    
+
     auto_thread = threading.Thread(target=start_auto_send, daemon=True)
     auto_thread.start()
-    
+
     run_bot_in_main_thread()
