@@ -77,65 +77,34 @@ CATEGORIES = {
     }
 }
 
-# ======== دریافت قیمت از Bonbast (قیمت دلار، تتر، درهم) ========
-def fetch_bonbast_prices():
-    """دریافت قیمت‌های لحظه‌ای از Bonbast"""
-    try:
-        resp = requests.get('https://bonbast.com/', timeout=10)
-        soup = resp.text
-        
-        # جستجوی قیمت دلار
-        usd_match = re.search(r'<td>USD</td>\s*<td[^>]*>([\d,]+)</td>', soup)
-        if usd_match:
-            usd_price = int(usd_match.group(1).replace(',', ''))
-        else:
-            usd_price = None
-            
-        # جستجوی قیمت تتر (USDT)
-        usdt_match = re.search(r'<td>USDT</td>\s*<td[^>]*>([\d,]+)</td>', soup)
-        if usdt_match:
-            usdt_price = int(usdt_match.group(1).replace(',', ''))
-        else:
-            usdt_price = None
-            
-        # جستجوی قیمت درهم (AED)
-        aed_match = re.search(r'<td>AED</td>\s*<td[^>]*>([\d,]+)</td>', soup)
-        if aed_match:
-            aed_price = int(aed_match.group(1).replace(',', ''))
-        else:
-            aed_price = None
-            
-        return {
-            'usd': usd_price,
-            'usdt': usdt_price,
-            'aed': aed_price
-        }
-    except Exception as e:
-        print(f"⚠️ خطا در دریافت از Bonbast: {e}")
-        return None
-
-# ======== دریافت قیمت تتر (فقط از Bonbast) ========
-def fetch_usdt_price():
-    prices = fetch_bonbast_prices()
-    if prices and prices.get('usdt'):
-        return prices['usdt']
-    return None
-
-# ======== دریافت قیمت درهم (فقط از Bonbast) ========
-def fetch_aed_price():
-    prices = fetch_bonbast_prices()
-    if prices and prices.get('aed'):
-        return prices['aed']
-    return None
-
-# ======== دریافت قیمت دلار (برای سایر تبدیل‌ها) ========
+# ======== دریافت قیمت دلار (فقط از tgju.org) ========
 def fetch_usd_price():
-    prices = fetch_bonbast_prices()
-    if prices and prices.get('usd'):
-        return prices['usd']
+    try:
+        resp = requests.get('https://www.tgju.org/', timeout=10)
+        match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
+        if match:
+            price = match.group(1).replace(',', '')
+            return int(price)
+    except:
+        pass
+    return 199900  # مقدار پیش‌فرض
+
+# ======== دریافت قیمت تتر از tgju ========
+def fetch_usdt_price():
+    usd_price = fetch_usd_price()
+    if usd_price:
+        return usd_price  # قیمت تتر به تومان برابر با نرخ دلار (۱ تتر = ۱ دلار)
     return None
 
-# ======== دریافت قیمت از یاهو ========
+# ======== دریافت قیمت درهم از tgju ========
+def fetch_aed_price():
+    usd_price = fetch_usd_price()
+    if not usd_price:
+        return None
+    # نرخ درهم به دلار حدود 3.67 است
+    return int(usd_price / 3.67)
+
+# ======== دریافت قیمت ========
 def fetch_yahoo(symbol):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1h&range=1d"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"}
@@ -147,7 +116,6 @@ def fetch_yahoo(symbol):
     except:
         return None
 
-# ======== دریافت قیمت از TwelveData ========
 def fetch_twelve(symbol):
     url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey=f8f6fe94d43b454ba0c9431ff529c466"
     try:
@@ -157,7 +125,6 @@ def fetch_twelve(symbol):
     except:
         return None
 
-# ======== دریافت قیمت از CoinGecko ========
 def fetch_coingecko(symbol):
     url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbol}&vs_currencies=usd"
     try:
@@ -167,16 +134,15 @@ def fetch_coingecko(symbol):
     except:
         return None
 
-# ======== دریافت قیمت اصلی ========
 def get_price(symbol_key):
     """دریافت قیمت جدید (اگر بازار باز باشد)"""
     if not is_market_open(symbol_key):
         return None
 
     if symbol_key == 'usdt':
-        return fetch_usdt_price()  # فقط از Bonbast
+        return fetch_usdt_price()
     elif symbol_key == 'aed':
-        return fetch_aed_price()   # فقط از Bonbast
+        return fetch_aed_price()
     elif symbol_key == 'btc':
         return fetch_yahoo('BTC-USD') or fetch_twelve('BTC/USD')
     elif symbol_key == 'eth':
@@ -221,10 +187,9 @@ def get_price(symbol_key):
 def is_market_open(symbol_key):
     now = datetime.now()
     today = now.weekday()
-    # ارزهای دیجیتال و واحدهای پولی ۲۴/۷
     if symbol_key in ['btc', 'eth', 'bnb', 'gram', 'xrp', 'sol', 'doge', 'bch', 'ltc', 'trx', 'dot', 'usdt', 'aed']:
         return True
-    if today == 6:  # یکشنبه
+    if today == 6:
         return False
     if symbol_key == 'sugar':
         iran_hour = (now.hour + 3) % 24
