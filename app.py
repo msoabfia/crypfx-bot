@@ -77,8 +77,9 @@ CATEGORIES = {
     }
 }
 
-# ======== دریافت قیمت تتر از ارزدیجیتال (ArzDigital) ========
+# ======== دریافت قیمت تتر (از ۳ منبع پشت سر هم) ========
 def fetch_usdt_price():
+    # منبع اول: ارزدیجیتال
     try:
         resp = requests.get('https://arzdigital.com/price/usdt/', timeout=8)
         if resp.status_code == 200:
@@ -88,10 +89,33 @@ def fetch_usdt_price():
                 return int(price)
     except:
         pass
+    
+    # منبع دوم: نوبیتکس
+    try:
+        resp = requests.get('https://api.nobitex.ir/market/stats?srcCurrency=usdt&dstCurrency=rls', timeout=8)
+        data = resp.json()
+        if data.get('stats') and 'USDT-IRT' in data['stats']:
+            price = data['stats']['USDT-IRT'].get('bestSell')
+            if price:
+                return int(float(price))
+    except:
+        pass
+    
+    # منبع سوم: tgju.org
+    try:
+        resp = requests.get('https://www.tgju.org/', timeout=8)
+        match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
+        if match:
+            price = match.group(1).replace(',', '')
+            return int(price)
+    except:
+        pass
+    
     return None
 
-# ======== دریافت قیمت درهم از ارزدیجیتال (ArzDigital) ========
+# ======== دریافت قیمت درهم (از ۲ منبع پشت سر هم) ========
 def fetch_aed_price():
+    # منبع اول: ارزدیجیتال
     try:
         resp = requests.get('https://arzdigital.com/price/aed/', timeout=8)
         if resp.status_code == 200:
@@ -101,9 +125,22 @@ def fetch_aed_price():
                 return int(price)
     except:
         pass
+    
+    # منبع دوم: tgju.org
+    try:
+        resp = requests.get('https://www.tgju.org/', timeout=8)
+        # الگوی قیمت دلار در tgju (درهم هم معمولاً کنارش هست، ولی ما از نرخ دلار محاسبه می‌کنیم)
+        match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
+        if match:
+            usd_price = int(match.group(1).replace(',', ''))
+            # تبدیل دلار به درهم با نرخ ثابت 3.67
+            return int(usd_price / 3.67)
+    except:
+        pass
+    
     return None
 
-# ======== دریافت قیمت از یاهو (برای بقیه) ========
+# ======== دریافت قیمت از یاهو ========
 def fetch_yahoo(symbol):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1h&range=1d"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"}
@@ -115,7 +152,6 @@ def fetch_yahoo(symbol):
     except:
         return None
 
-# ======== دریافت قیمت ========
 def get_price(symbol_key):
     if not is_market_open(symbol_key):
         return None
