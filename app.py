@@ -75,72 +75,19 @@ CATEGORIES = {
 }
 
 def fetch_usdt_price():
-    # 1. Nobitex API (معتبرترین منبع)
-    try:
-        resp = requests.get('https://api.nobitex.ir/market/stats?srcCurrency=usdt&dstCurrency=rls', timeout=8)
-        data = resp.json()
-        if data.get('stats') and 'USDT-IRT' in data['stats']:
-            price = data['stats']['USDT-IRT'].get('bestSell')
-            if price:
-                return int(float(price))
-    except:
-        pass
-
-    # 2. ArzDigital (با impersonate)
-    try:
-        resp = cffi_requests.get('https://arzdigital.com/price/usdt/', impersonate="chrome120", timeout=8)
-        if resp.status_code == 200:
-            match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
-            if match:
-                return int(match.group(1).replace(',', ''))
-    except:
-        pass
-
-    # 3. Bonbast
-    try:
-        resp = cffi_requests.get('https://bonbast.com/', impersonate="chrome120", timeout=8)
-        if resp.status_code == 200:
-            match = re.search(r'<td class="ltr">([\d,]+)</td>', resp.text)
-            if match:
-                return int(match.group(1).replace(',', ''))
-    except:
-        pass
-
-    # 4. دریافت قیمت دلار از tgju و استفاده به‌عنوان تتر (پشتیبان)
+    """دریافت قیمت تتر فقط از TGJU (قیمت دلار)"""
     try:
         resp = cffi_requests.get('https://www.tgju.org/', impersonate="chrome120", timeout=8)
         if resp.status_code == 200:
             match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
             if match:
-                usd_price = int(match.group(1).replace(',', ''))
-                return usd_price  # تقریباً برابر تتر
+                return int(match.group(1).replace(',', ''))
     except:
         pass
-
     return None
 
 def fetch_aed_price():
-    # 1. ArzDigital
-    try:
-        resp = cffi_requests.get('https://arzdigital.com/price/aed/', impersonate="chrome120", timeout=8)
-        if resp.status_code == 200:
-            match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
-            if match:
-                return int(match.group(1).replace(',', ''))
-    except:
-        pass
-
-    # 2. Bonbast
-    try:
-        resp = cffi_requests.get('https://bonbast.com/', impersonate="chrome120", timeout=8)
-        if resp.status_code == 200:
-            match = re.search(r'<td class="ltr">([\d,]+)</td>', resp.text)
-            if match:
-                return int(match.group(1).replace(',', ''))
-    except:
-        pass
-
-    # 3. دریافت قیمت دلار از tgju و تقسیم بر 3.67 (نرخ ثابت)
+    """دریافت قیمت درهم فقط از TGJU (قیمت دلار تقسیم بر ۳.۶۷)"""
     try:
         resp = cffi_requests.get('https://www.tgju.org/', impersonate="chrome120", timeout=8)
         if resp.status_code == 200:
@@ -150,7 +97,6 @@ def fetch_aed_price():
                 return int(usd_price / 3.67)
     except:
         pass
-
     return None
 
 def fetch_yahoo(symbol):
@@ -172,17 +118,7 @@ def get_price(symbol_key):
     elif symbol_key == 'aed':
         return fetch_aed_price()
     elif symbol_key == 'gram':
-        price = fetch_yahoo('TON-USD')
-        if price and price > 1:
-            return price
-        try:
-            resp = requests.get('https://api.coingecko.com/api/v3/simple/price?ids=the-open-network&vs_currencies=usd', timeout=8)
-            data = resp.json()
-            if data.get('the-open-network'):
-                return float(data['the-open-network']['usd'])
-        except:
-            pass
-        return None
+        return fetch_yahoo('TON-USD')  # فقط از یاهو، بدون مقدار ثابت
     elif symbol_key == 'btc':
         return fetch_yahoo('BTC-USD')
     elif symbol_key == 'eth':
@@ -219,19 +155,24 @@ def get_price(symbol_key):
 def is_market_open(symbol_key):
     now = datetime.now()
     today = now.weekday()
+    # ارزهای دیجیتال و واحدهای پولی همیشه باز هستند
     if symbol_key in ['btc', 'eth', 'bnb', 'gram', 'xrp', 'sol', 'doge', 'bch', 'ltc', 'trx', 'dot', 'usdt', 'aed']:
         return True
+    # یکشنبه‌ها بازار همه چیز بسته است (به جز ارزهای دیجیتال که قبلاً بررسی شدند)
     if today == 6:
         return False
+    # قوانین خاص برای شکر
     if symbol_key == 'sugar':
         iran_hour = (now.hour + 3) % 24
         iran_minute = now.minute + 30
         if iran_minute >= 60:
             iran_hour = (iran_hour + 1) % 24
             iran_minute -= 60
+        # بازار شکر از ۱۲ تا ۲۱:۳۰ به وقت ایران باز است
         if iran_hour >= 12 and (iran_hour < 21 or (iran_hour == 21 and iran_minute <= 30)):
             return True
         return False
+    # سایر کالاها (طلا، نقره، نفت، گاز، برنت) در روزهای غیر یکشنبه باز هستند
     return True
 
 DB_PATH = "market_data.db"
@@ -357,11 +298,16 @@ def generate_price_message(selections):
         for key, name, emoji in cat_selected:
             new_price, old_price = get_price_with_old(key)
             if new_price is None:
-                last = get_last_price(key)
-                if last is not None:
-                    formatted = format_price(last, key)
-                    lines.append(f"{emoji} {name} : {formatted} 🔒 بازار بسته")
+                # بررسی دقیق بازار بسته بودن
+                if not is_market_open(key):
+                    last = get_last_price(key)
+                    if last is not None:
+                        formatted = format_price(last, key)
+                        lines.append(f"{emoji} {name} : {formatted} 🔒 بازار بسته")
+                    else:
+                        lines.append(f"{emoji} {name} : ⛔ در دسترس نیست")
                 else:
+                    # بازار باز است اما قیمت دریافت نشد
                     lines.append(f"{emoji} {name} : ⛔ در دسترس نیست")
                 continue
             formatted = format_price(new_price, key)
@@ -513,10 +459,13 @@ async def status_single(update, symbol_key, name, emoji):
     new_price, old_price = get_price_with_old(symbol_key)
 
     if new_price is None:
-        last = get_last_price(symbol_key)
-        if last is not None:
-            formatted = format_price(last, symbol_key)
-            await send_message(chat_id, f"{emoji} **{name}**\n💰 {formatted}\n🔒 بازار بسته", parse_mode='Markdown')
+        if not is_market_open(symbol_key):
+            last = get_last_price(symbol_key)
+            if last is not None:
+                formatted = format_price(last, symbol_key)
+                await send_message(chat_id, f"{emoji} **{name}**\n💰 {formatted}\n🔒 بازار بسته", parse_mode='Markdown')
+            else:
+                await send_message(chat_id, f"{emoji} {name}: ⛔ در دسترس نیست.")
         else:
             await send_message(chat_id, f"{emoji} {name}: ⛔ در دسترس نیست.")
         return
