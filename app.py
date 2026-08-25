@@ -14,57 +14,15 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 from telegram.error import TimedOut, NetworkError
 import logging
 import threading
-from collections import OrderedDict
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN environment variable not set!")
 CHAT_ID = os.environ.get('CHAT_ID', '483833953')
-INTERVAL = 60  # هر ۶۰ ثانیه یک بار کش به‌روز می‌شود
+INTERVAL = 60
 TIMEOUT = 30
 
 logging.basicConfig(level=logging.ERROR)
-
-# =============== کش سراسری قیمت‌ها ===============
-price_cache = {
-    'data': {},        # {symbol: price}
-    'last_update': 0,  # timestamp آخرین به‌روزرسانی
-    'lock': threading.Lock()  # برای جلوگیری از race condition
-}
-
-def get_all_symbols_list():
-    """لیست تمام کلیدهای نمادها"""
-    all_keys = []
-    for category in CATEGORIES.values():
-        for key, _, _ in category['symbols']:
-            all_keys.append(key)
-    return all_keys
-
-def refresh_price_cache():
-    """دریافت قیمت همه نمادها و ذخیره در کش (فقط یک بار در هر دقیقه)"""
-    with price_cache['lock']:
-        now = time.time()
-        # اگر کمتر از ۶۰ ثانیه از آخرین به‌روزرسانی گذشته، نیازی به به‌روزرسانی نیست
-        if now - price_cache['last_update'] < INTERVAL:
-            return
-        
-        print(f"🔄 به‌روزرسانی کش قیمت‌ها در {datetime.now().isoformat()}")
-        new_data = {}
-        for symbol in get_all_symbols_list():
-            # قیمت را از منبع دریافت می‌کنیم (بدون ذخیره در دیتابیس)
-            price = fetch_price_from_source(symbol)
-            if price is not None:
-                new_data[symbol] = price
-                # ذخیره در دیتابیس (فقط در صورت دریافت)
-                save_price(symbol, price)
-        price_cache['data'] = new_data
-        price_cache['last_update'] = now
-
-def get_cached_price(symbol):
-    """دریافت قیمت از کش (اگر کش منقضی شده باشد، ابتدا به‌روز می‌شود)"""
-    refresh_price_cache()  # اگر زمانش رسیده باشد، کش را به‌روز می‌کند
-    with price_cache['lock']:
-        return price_cache['data'].get(symbol)
 
 # =============== دسته‌بندی نمادها ===============
 CATEGORIES = {
@@ -118,9 +76,22 @@ CATEGORIES = {
     }
 }
 
+# =============== کش سراسری قیمت‌ها ===============
+price_cache = {
+    'data': {},        # {symbol: price}
+    'last_update': 0,  # timestamp آخرین به‌روزرسانی
+    'lock': threading.Lock()
+}
+
+def get_all_symbols_list():
+    all_keys = []
+    for category in CATEGORIES.values():
+        for key, _, _ in category['symbols']:
+            all_keys.append(key)
+    return all_keys
+
 # =============== توابع دریافت قیمت از منابع ===============
 def fetch_usdt_price():
-    """دریافت قیمت تتر از TGJU"""
     try:
         resp = cffi_requests.get('https://www.tgju.org/', impersonate="chrome120", timeout=8)
         if resp.status_code == 200:
@@ -168,7 +139,6 @@ def fetch_yahoo(symbol):
         return None
 
 def fetch_price_from_source(symbol_key):
-    """دریافت قیمت از منبع (بدون کش) - فقط برای به‌روزرسانی کش استفاده می‌شود"""
     if symbol_key == 'usdt':
         return fetch_usdt_price()
     elif symbol_key == 'aed':
@@ -257,6 +227,38 @@ def get_last_price(symbol):
     conn.close()
     return row[0] if row else None
 
+# =============== مدیریت کش (با ذخیره‌سازی در دیتابیس) ===============
+def refresh_price_cache():
+    """دریافت قیمت همه نمادها، ذخیره در کش و دیتابیس (فقط یک بار در دقیقه)"""
+    with price_cache['lock']:
+        now = time.time()
+        if now - price_cache['last_update'] < INTERVAL:
+            return
+        
+        print(f"🔄 به‌روزرسانی کش قیمت‌ها در {datetime.now().isoformat()}")
+        new_data = {}
+        for symbol in get_all_symbols_list():
+            price = fetch_price_from_source(symbol)
+            if price is not None:
+                new_data[symbol] = price
+                # ذخیره در دیتابیس (فقط یک بار در هر به‌روزرسانی)
+                save_price(symbol, price)
+        price_cache['data'] = new_data
+        price_cache['last_update'] = now
+
+def get_cached_price(symbol):
+    """دریافت قیمت از کش (اگر کش منقضی شده باشد، ابتدا به‌روز می‌شود)"""
+    refresh_price_cache()
+    with price_cache['lock']:
+        return price_cache['data'].get(symbol)
+
+def get_price_with_old(symbol_key):
+    """دریافت قیمت جدید از کش و قیمت قدیمی از دیتابیس (بدون ذخیره‌سازی مجدد)"""
+    old_price = get_last_price(symbol_key)
+    new_price = get_cached_price(symbol_key)
+    return new_price, old_price
+
+# =============== توابع کاربری ===============
 def get_user_selections(user_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -333,16 +335,6 @@ def format_change(change):
     else:
         return f"📉 {change:+.2f}%"
 
-def get_price_with_old(symbol_key):
-    """دریافت قیمت از کش و مقایسه با آخرین قیمت دیتابیس"""
-    old_price = get_last_price(symbol_key)
-    new_price = get_cached_price(symbol_key)  # از کش استفاده می‌کند
-    
-    # اگر قیمت جدید از کش وجود داشت، آن را در دیتابیس ذخیره می‌کنیم
-    if new_price is not None:
-        save_price(symbol_key, new_price)
-    return new_price, old_price
-
 def generate_price_message(selections):
     lines = []
     for cat_key, cat in CATEGORIES.items():
@@ -375,7 +367,7 @@ def generate_price_message(selections):
         lines.append("")
     return "\n".join(lines) if lines else "هیچ نمادی انتخاب نشده است."
 
-# =============== توابع ربات (بدون تغییر) ===============
+# =============== توابع ربات ===============
 async def show_main_menu(chat_id, user_id):
     text = "📊 **به ربات قیمت‌های لحظه‌ای خوش آمدید!**\n\n"
     text += "لطفاً یک دسته را انتخاب کنید:\n"
@@ -583,13 +575,10 @@ async def help_command(update, context):
     )
 
 async def auto_send_loop():
-    """حلقه ارسال خودکار - هر دقیقه قیمت‌ها را برای کاربران فعال ارسال می‌کند"""
     bot = Bot(token=TELEGRAM_TOKEN)
     while True:
         try:
-            # قبل از ارسال، کش را به‌روز می‌کنیم (اگر زمانش رسیده باشد)
-            refresh_price_cache()
-            
+            refresh_price_cache()  # به‌روزرسانی کش و دیتابیس (فقط یک بار)
             for user_id in list(sending_active.keys()):
                 if not sending_active.get(user_id, False):
                     continue
