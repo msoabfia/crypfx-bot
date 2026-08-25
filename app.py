@@ -6,7 +6,6 @@ import sqlite3
 import requests
 import re
 import json
-import statistics
 from datetime import datetime
 from curl_cffi import requests as cffi_requests
 from flask import Flask
@@ -90,146 +89,73 @@ def get_all_symbols_list():
             all_keys.append(key)
     return all_keys
 
-# =============== توابع دریافت قیمت از منابع مختلف ===============
-
-def fetch_usdt_nobitex():
-    """دریافت از نوبیتکس"""
-    try:
-        resp = requests.get(
-            'https://api.nobitex.ir/market/stats',
-            params={'srcCurrency': 'usdt', 'dstCurrency': 'rls'},
-            timeout=8
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get('status') == 'ok':
-                stats = data.get('stats', {}).get('USDT-IRT', {})
-                price = stats.get('bestSell') or stats.get('bestBuy') or stats.get('latest')
-                if price:
-                    return int(float(price) / 10)
-    except Exception as e:
-        print(f"⚠️ Nobitex error: {e}")
-    return None
-
-def fetch_usdt_wallex():
-    """دریافت از والکس"""
-    try:
-        resp = requests.get('https://api.wallex.ir/hector/web/v1/markets', timeout=8)
-        if resp.status_code == 200:
-            data = resp.json()
-            for market in data.get('result', {}).get('markets', []):
-                if market.get('symbol') == 'USDTTMN':
-                    price = market.get('price')
-                    if price:
-                        return int(float(price))
-    except Exception as e:
-        print(f"⚠️ Wallex error: {e}")
-    return None
-
-def fetch_usdt_tabdeal():
-    """دریافت از تبدیل (عمق بازار)"""
-    try:
-        resp = requests.get(
-            'https://api1.tabdeal.org/r/api/v1/depth',
-            params={'symbol': 'USDTIRT'},
-            timeout=8
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get('asks') and len(data['asks']) > 0:
-                price = data['asks'][0][0]
-                return int(float(price) / 10)
-    except Exception as e:
-        print(f"⚠️ Tabdeal error: {e}")
-    return None
-
-def fetch_usdt_abantether():
-    """دریافت از آبان‌تتر (اسکرپینگ)"""
-    try:
-        resp = cffi_requests.get('https://abantether.com', impersonate="chrome120", timeout=8)
-        if resp.status_code == 200:
-            match = re.search(r'([\d,]+)\s*تومان\s*1\s*تتر', resp.text)
-            if match:
-                return int(match.group(1).replace(',', ''))
-    except Exception as e:
-        print(f"⚠️ Abantether error: {e}")
-    return None
-
-def fetch_usdt_tgju():
-    """دریافت از TGJU (قیمت دلار)"""
-    try:
-        resp = cffi_requests.get('https://www.tgju.org/', impersonate="chrome120", timeout=8)
-        if resp.status_code == 200:
-            match = re.search(r'var\s+priceJson\s*=\s*({.*?});', resp.text, re.DOTALL)
-            if match:
-                data = json.loads(match.group(1))
-                if 'price_usd' in data:
-                    return int(float(data['price_usd'].replace(',', '')) / 10)
-            match = re.search(r'<span[^>]*class="price"[^>]*>([\d,]+)</span>', resp.text)
-            if match:
-                return int(match.group(1).replace(',', '')) / 10
-    except Exception as e:
-        print(f"⚠️ TGJU error: {e}")
-    return None
+# =============== توابع دریافت قیمت (بین‌المللی) ===============
 
 def fetch_usdt_price():
     """
-    دریافت قیمت تتر از چند منبع، اعتبارسنجی و میانگین‌گیری
+    دریافت قیمت تتر به تومان از دو منبع بین‌المللی:
+    1. CoinGecko: قیمت تتر به دلار
+    2. ExchangeRate.host: نرخ دلار به ریال
+    سپس محاسبه: قیمت تتر به تومان = (USDT/USD) × (USD/IRR) ÷ 10
     """
-    sources = [
-        ('نوبیتکس', fetch_usdt_nobitex),
-        ('والکس', fetch_usdt_wallex),
-        ('تبدیل', fetch_usdt_tabdeal),
-        ('آبان‌تتر', fetch_usdt_abantether),
-        ('TGJU', fetch_usdt_tgju),
-    ]
+    try:
+        # 1. دریافت قیمت تتر به دلار از CoinGecko
+        resp = requests.get(
+            'https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=usd',
+            timeout=10
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        usdt_usd = data.get('tether', {}).get('usd')
+        if not usdt_usd:
+            return None
+        
+        # 2. دریافت نرخ دلار به ریال از ExchangeRate.host
+        resp = requests.get(
+            'https://api.exchangerate.host/latest?base=USD&symbols=IRR',
+            timeout=10
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        usd_irr = data.get('rates', {}).get('IRR')
+        if not usd_irr:
+            return None
+        
+        # 3. محاسبه قیمت تتر به تومان
+        usdt_toman = (usdt_usd * usd_irr) / 10
+        return int(usdt_toman)
     
-    prices = []
-    for name, func in sources:
-        try:
-            price = func()
-            if price and price > 0:
-                prices.append(price)
-                print(f"✅ {name}: {price:,} تومان")
-        except Exception as e:
-            print(f"❌ {name}: خطا - {e}")
-    
-    if not prices:
+    except Exception as e:
+        print(f"⚠️ خطا در دریافت تتر: {e}")
         return None
-    
-    # فیلتر قیمت‌های پرت (بیش از ۵٪ اختلاف با میانگین)
-    if len(prices) >= 3:
-        mean_price = statistics.mean(prices)
-        valid_prices = [p for p in prices if abs(p - mean_price) / mean_price <= 0.05]
-        if valid_prices:
-            final_price = int(statistics.mean(valid_prices))
-            print(f"📊 میانگین نهایی: {final_price:,} تومان (از {len(valid_prices)} منبع معتبر)")
-            return final_price
-    
-    # اگر تعداد منابع کم بود یا فیلتر همه رو حذف کرد، از میانگین همه استفاده کن
-    final_price = int(statistics.mean(prices))
-    print(f"📊 میانگین نهایی: {final_price:,} تومان (از {len(prices)} منبع)")
-    return final_price
 
 def fetch_aed_price():
-    """دریافت قیمت درهم از نوبیتکس (از طریق قیمت دلار)"""
+    """
+    دریافت قیمت درهم از طریق نرخ دلار:
+    قیمت درهم به تومان = (نرخ دلار به تومان) ÷ ۳.۶۷
+    """
     try:
+        # دریافت نرخ دلار به ریال
         resp = requests.get(
-            'https://api.nobitex.ir/market/stats',
-            params={'srcCurrency': 'usd', 'dstCurrency': 'rls'},
-            timeout=8
+            'https://api.exchangerate.host/latest?base=USD&symbols=IRR',
+            timeout=10
         )
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get('status') == 'ok':
-                stats = data.get('stats', {}).get('USD-IRT', {})
-                price = stats.get('bestSell') or stats.get('bestBuy') or stats.get('latest')
-                if price:
-                    usd_toman = int(float(price) / 10)
-                    return int(usd_toman / 3.67)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        usd_irr = data.get('rates', {}).get('IRR')
+        if not usd_irr:
+            return None
+        
+        usd_toman = usd_irr / 10
+        aed_toman = usd_toman / 3.67
+        return int(aed_toman)
+    
     except Exception as e:
-        print(f"⚠️ AED error: {e}")
-    return None
+        print(f"⚠️ خطا در دریافت درهم: {e}")
+        return None
 
 def fetch_yahoo(symbol):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1h&range=1d"
