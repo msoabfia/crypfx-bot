@@ -6,6 +6,7 @@ import sqlite3
 import requests
 import re
 import json
+import statistics
 from datetime import datetime
 from curl_cffi import requests as cffi_requests
 from flask import Flask
@@ -24,7 +25,6 @@ TIMEOUT = 30
 
 logging.basicConfig(level=logging.ERROR)
 
-# =============== دسته‌بندی نمادها ===============
 CATEGORIES = {
     'fiat': {
         'name': 'واحد پولی(تومان)',
@@ -76,9 +76,9 @@ CATEGORIES = {
     }
 }
 
-# =============== کش سراسری قیمت‌ها (شامل old_price) ===============
+# =============== کش سراسری قیمت‌ها ===============
 price_cache = {
-    'data': {},        # {symbol: {'new': price, 'old': old_price}}
+    'data': {},
     'last_update': 0,
     'lock': threading.Lock()
 }
@@ -90,52 +90,145 @@ def get_all_symbols_list():
             all_keys.append(key)
     return all_keys
 
-# =============== توابع دریافت قیمت از منابع ===============
-def fetch_usdt_price():
-    """دریافت قیمت تتر از نوبیتکس (به دلیل عدم پاسخگویی TGJU)"""
+# =============== توابع دریافت قیمت از منابع مختلف ===============
+
+def fetch_usdt_nobitex():
+    """دریافت از نوبیتکس"""
     try:
-        resp = requests.get('https://api.nobitex.ir/market/stats?srcCurrency=usdt&dstCurrency=rls', timeout=8)
-        data = resp.json()
-        if data.get('stats') and 'USDT-IRT' in data['stats']:
-            price = data['stats']['USDT-IRT'].get('bestSell')
-            if price:
-                return int(float(price))
-    except:
-        pass
-    # پشتیبان: TGJU (با ایمپرسونیت)
+        resp = requests.get(
+            'https://api.nobitex.ir/market/stats',
+            params={'srcCurrency': 'usdt', 'dstCurrency': 'rls'},
+            timeout=8
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get('status') == 'ok':
+                stats = data.get('stats', {}).get('USDT-IRT', {})
+                price = stats.get('bestSell') or stats.get('bestBuy') or stats.get('latest')
+                if price:
+                    return int(float(price) / 10)
+    except Exception as e:
+        print(f"⚠️ Nobitex error: {e}")
+    return None
+
+def fetch_usdt_wallex():
+    """دریافت از والکس"""
+    try:
+        resp = requests.get('https://api.wallex.ir/hector/web/v1/markets', timeout=8)
+        if resp.status_code == 200:
+            data = resp.json()
+            for market in data.get('result', {}).get('markets', []):
+                if market.get('symbol') == 'USDTTMN':
+                    price = market.get('price')
+                    if price:
+                        return int(float(price))
+    except Exception as e:
+        print(f"⚠️ Wallex error: {e}")
+    return None
+
+def fetch_usdt_tabdeal():
+    """دریافت از تبدیل (عمق بازار)"""
+    try:
+        resp = requests.get(
+            'https://api1.tabdeal.org/r/api/v1/depth',
+            params={'symbol': 'USDTIRT'},
+            timeout=8
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get('asks') and len(data['asks']) > 0:
+                price = data['asks'][0][0]
+                return int(float(price) / 10)
+    except Exception as e:
+        print(f"⚠️ Tabdeal error: {e}")
+    return None
+
+def fetch_usdt_abantether():
+    """دریافت از آبان‌تتر (اسکرپینگ)"""
+    try:
+        resp = cffi_requests.get('https://abantether.com', impersonate="chrome120", timeout=8)
+        if resp.status_code == 200:
+            match = re.search(r'([\d,]+)\s*تومان\s*1\s*تتر', resp.text)
+            if match:
+                return int(match.group(1).replace(',', ''))
+    except Exception as e:
+        print(f"⚠️ Abantether error: {e}")
+    return None
+
+def fetch_usdt_tgju():
+    """دریافت از TGJU (قیمت دلار)"""
     try:
         resp = cffi_requests.get('https://www.tgju.org/', impersonate="chrome120", timeout=8)
         if resp.status_code == 200:
             match = re.search(r'var\s+priceJson\s*=\s*({.*?});', resp.text, re.DOTALL)
             if match:
                 data = json.loads(match.group(1))
-                if 'usd' in data:
-                    return int(float(data['usd'].replace(',', '')))
-                elif 'price_usd' in data:
-                    return int(float(data['price_usd'].replace(',', '')))
+                if 'price_usd' in data:
+                    return int(float(data['price_usd'].replace(',', '')) / 10)
             match = re.search(r'<span[^>]*class="price"[^>]*>([\d,]+)</span>', resp.text)
             if match:
-                return int(match.group(1).replace(',', ''))
-    except:
-        pass
+                return int(match.group(1).replace(',', '')) / 10
+    except Exception as e:
+        print(f"⚠️ TGJU error: {e}")
     return None
 
+def fetch_usdt_price():
+    """
+    دریافت قیمت تتر از چند منبع، اعتبارسنجی و میانگین‌گیری
+    """
+    sources = [
+        ('نوبیتکس', fetch_usdt_nobitex),
+        ('والکس', fetch_usdt_wallex),
+        ('تبدیل', fetch_usdt_tabdeal),
+        ('آبان‌تتر', fetch_usdt_abantether),
+        ('TGJU', fetch_usdt_tgju),
+    ]
+    
+    prices = []
+    for name, func in sources:
+        try:
+            price = func()
+            if price and price > 0:
+                prices.append(price)
+                print(f"✅ {name}: {price:,} تومان")
+        except Exception as e:
+            print(f"❌ {name}: خطا - {e}")
+    
+    if not prices:
+        return None
+    
+    # فیلتر قیمت‌های پرت (بیش از ۵٪ اختلاف با میانگین)
+    if len(prices) >= 3:
+        mean_price = statistics.mean(prices)
+        valid_prices = [p for p in prices if abs(p - mean_price) / mean_price <= 0.05]
+        if valid_prices:
+            final_price = int(statistics.mean(valid_prices))
+            print(f"📊 میانگین نهایی: {final_price:,} تومان (از {len(valid_prices)} منبع معتبر)")
+            return final_price
+    
+    # اگر تعداد منابع کم بود یا فیلتر همه رو حذف کرد، از میانگین همه استفاده کن
+    final_price = int(statistics.mean(prices))
+    print(f"📊 میانگین نهایی: {final_price:,} تومان (از {len(prices)} منبع)")
+    return final_price
+
 def fetch_aed_price():
-    """دریافت قیمت درهم از نوبیتکس از طریق قیمت دلار"""
+    """دریافت قیمت درهم از نوبیتکس (از طریق قیمت دلار)"""
     try:
-        resp = requests.get('https://api.nobitex.ir/market/stats?srcCurrency=usd&dstCurrency=rls', timeout=8)
-        data = resp.json()
-        if data.get('stats') and 'USD-IRT' in data['stats']:
-            price = data['stats']['USD-IRT'].get('bestSell')
-            if price:
-                usd_price = int(float(price))
-                return int(usd_price / 3.67)
-    except:
-        pass
-    # پشتیبان: از تابع fetch_usdt_price
-    usd_price = fetch_usdt_price()
-    if usd_price:
-        return int(usd_price / 3.67)
+        resp = requests.get(
+            'https://api.nobitex.ir/market/stats',
+            params={'srcCurrency': 'usd', 'dstCurrency': 'rls'},
+            timeout=8
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get('status') == 'ok':
+                stats = data.get('stats', {}).get('USD-IRT', {})
+                price = stats.get('bestSell') or stats.get('bestBuy') or stats.get('latest')
+                if price:
+                    usd_toman = int(float(price) / 10)
+                    return int(usd_toman / 3.67)
+    except Exception as e:
+        print(f"⚠️ AED error: {e}")
     return None
 
 def fetch_yahoo(symbol):
@@ -219,7 +312,6 @@ def is_market_open(symbol_key):
         return False
     return True
 
-# =============== دیتابیس ===============
 DB_PATH = "market_data.db"
 
 def init_db():
@@ -250,9 +342,7 @@ def get_last_price(symbol):
     conn.close()
     return row[0] if row else None
 
-# =============== مدیریت کش (با ذخیره old_price) ===============
 def refresh_price_cache():
-    """دریافت قیمت‌های جدید و ذخیره در کش به همراه قیمت قدیمی"""
     with price_cache['lock']:
         now = time.time()
         if now - price_cache['last_update'] < INTERVAL:
@@ -261,21 +351,18 @@ def refresh_price_cache():
         print(f"🔄 به‌روزرسانی کش قیمت‌ها در {datetime.now().isoformat()}")
         new_data = {}
         for symbol in get_all_symbols_list():
-            old_price = get_last_price(symbol)  # قیمت قدیمی از دیتابیس
+            old_price = get_last_price(symbol)
             new_price = fetch_price_from_source(symbol)
             if new_price is not None:
                 new_data[symbol] = {'new': new_price, 'old': old_price}
-                # ذخیره در دیتابیس (فقط قیمت جدید)
                 save_price(symbol, new_price)
             else:
-                # اگر قیمت جدید دریافت نشد، از قیمت قدیمی استفاده کن (با old=همان)
                 if old_price is not None:
                     new_data[symbol] = {'new': old_price, 'old': old_price}
         price_cache['data'] = new_data
         price_cache['last_update'] = now
 
 def get_cached_price_with_old(symbol):
-    """دریافت قیمت جدید و قدیمی از کش (اگر کش منقضی شده باشد، به‌روز می‌شود)"""
     refresh_price_cache()
     with price_cache['lock']:
         data = price_cache['data'].get(symbol)
@@ -283,7 +370,6 @@ def get_cached_price_with_old(symbol):
             return data.get('new'), data.get('old')
         return None, None
 
-# =============== توابع کاربری ===============
 def get_user_selections(user_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -353,7 +439,7 @@ def format_price(price, symbol_key):
 def format_change(change):
     if change is None:
         return ""
-    if abs(change) < 0.0001:  # تغییرات بسیار کوچک را نادیده بگیر
+    if abs(change) < 0.0001:
         return "➖ بدون تغییر"
     elif change > 0:
         return f"📈 {change:+.2f}%"
@@ -369,7 +455,6 @@ def generate_price_message(selections):
         lines.append(f"{cat['emoji']} {cat['name']}:")
         for key, name, emoji in cat_selected:
             new_price, old_price = get_cached_price_with_old(key)
-            # اگر قیمت جدید دریافت نشد، از آخرین قیمت دیتابیس استفاده کن
             if new_price is None:
                 last = get_last_price(key)
                 if last is not None:
@@ -393,7 +478,6 @@ def generate_price_message(selections):
         lines.append("")
     return "\n".join(lines) if lines else "هیچ نمادی انتخاب نشده است."
 
-# =============== توابع ربات (بدون تغییر) ===============
 async def show_main_menu(chat_id, user_id):
     text = "📊 **به ربات قیمت‌های لحظه‌ای خوش آمدید!**\n\n"
     text += "لطفاً یک دسته را انتخاب کنید:\n"
@@ -604,7 +688,7 @@ async def auto_send_loop():
     bot = Bot(token=TELEGRAM_TOKEN)
     while True:
         try:
-            refresh_price_cache()  # به‌روزرسانی کش و دیتابیس (فقط یک بار)
+            refresh_price_cache()
             for user_id in list(sending_active.keys()):
                 if not sending_active.get(user_id, False):
                     continue
