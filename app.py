@@ -5,6 +5,7 @@ import time
 import sqlite3
 import requests
 import re
+import json
 from datetime import datetime
 from curl_cffi import requests as cffi_requests
 from flask import Flask
@@ -75,28 +76,28 @@ CATEGORIES = {
 }
 
 def fetch_usdt_price():
-    """دریافت قیمت تتر فقط از TGJU (قیمت دلار)"""
+    """دریافت قیمت تتر از TGJU با استفاده از API داخلی"""
     try:
         resp = cffi_requests.get('https://www.tgju.org/', impersonate="chrome120", timeout=8)
         if resp.status_code == 200:
-            match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
+            match = re.search(r'var\s+priceJson\s*=\s*({.*?});', resp.text, re.DOTALL)
             if match:
-                return int(match.group(1).replace(',', ''))
+                data = json.loads(match.group(1))
+                if 'usd' in data:
+                    return int(float(data['usd'].replace(',', '')))
+                elif 'price_usd' in data:
+                    return int(float(data['price_usd'].replace(',', '')))
+        match = re.search(r'<span[^>]*class="price"[^>]*>([\d,]+)</span>', resp.text)
+        if match:
+            return int(match.group(1).replace(',', ''))
     except:
         pass
     return None
 
 def fetch_aed_price():
-    """دریافت قیمت درهم فقط از TGJU (قیمت دلار تقسیم بر ۳.۶۷)"""
-    try:
-        resp = cffi_requests.get('https://www.tgju.org/', impersonate="chrome120", timeout=8)
-        if resp.status_code == 200:
-            match = re.search(r'<span class="price">([\d,]+)</span>', resp.text)
-            if match:
-                usd_price = int(match.group(1).replace(',', ''))
-                return int(usd_price / 3.67)
-    except:
-        pass
+    usd_price = fetch_usdt_price()
+    if usd_price:
+        return int(usd_price / 3.67)
     return None
 
 def fetch_yahoo(symbol):
@@ -105,9 +106,23 @@ def fetch_yahoo(symbol):
     try:
         resp = cffi_requests.get(url, headers=headers, impersonate="chrome120", timeout=8)
         data = resp.json()
-        price = data['chart']['result'][0]['indicators']['quote'][0]['close'][-1]
-        return float(price) if price is not None else None
-    except:
+        if 'chart' in data and 'result' in data['chart'] and len(data['chart']['result']) > 0:
+            result = data['chart']['result'][0]
+            # اولویت با regularMarketPrice
+            if 'meta' in result and 'regularMarketPrice' in result['meta']:
+                price = result['meta']['regularMarketPrice']
+                if price is not None:
+                    return float(price)
+            # اگر نبود، از indicators استفاده کن
+            if 'indicators' in result and 'quote' in result['indicators'] and len(result['indicators']['quote']) > 0:
+                quote = result['indicators']['quote'][0]
+                if 'close' in quote and quote['close']:
+                    for p in reversed(quote['close']):
+                        if p is not None:
+                            return float(p)
+        return None
+    except Exception as e:
+        print(f"Error fetching {symbol}: {e}")
         return None
 
 def get_price(symbol_key):
@@ -118,7 +133,7 @@ def get_price(symbol_key):
     elif symbol_key == 'aed':
         return fetch_aed_price()
     elif symbol_key == 'gram':
-        return fetch_yahoo('TON-USD')  # فقط از یاهو، بدون مقدار ثابت
+        return fetch_yahoo('TON-USD')
     elif symbol_key == 'btc':
         return fetch_yahoo('BTC-USD')
     elif symbol_key == 'eth':
@@ -155,24 +170,19 @@ def get_price(symbol_key):
 def is_market_open(symbol_key):
     now = datetime.now()
     today = now.weekday()
-    # ارزهای دیجیتال و واحدهای پولی همیشه باز هستند
     if symbol_key in ['btc', 'eth', 'bnb', 'gram', 'xrp', 'sol', 'doge', 'bch', 'ltc', 'trx', 'dot', 'usdt', 'aed']:
         return True
-    # یکشنبه‌ها بازار همه چیز بسته است (به جز ارزهای دیجیتال که قبلاً بررسی شدند)
     if today == 6:
         return False
-    # قوانین خاص برای شکر
     if symbol_key == 'sugar':
         iran_hour = (now.hour + 3) % 24
         iran_minute = now.minute + 30
         if iran_minute >= 60:
             iran_hour = (iran_hour + 1) % 24
             iran_minute -= 60
-        # بازار شکر از ۱۲ تا ۲۱:۳۰ به وقت ایران باز است
         if iran_hour >= 12 and (iran_hour < 21 or (iran_hour == 21 and iran_minute <= 30)):
             return True
         return False
-    # سایر کالاها (طلا، نقره، نفت، گاز، برنت) در روزهای غیر یکشنبه باز هستند
     return True
 
 DB_PATH = "market_data.db"
@@ -298,7 +308,6 @@ def generate_price_message(selections):
         for key, name, emoji in cat_selected:
             new_price, old_price = get_price_with_old(key)
             if new_price is None:
-                # بررسی دقیق بازار بسته بودن
                 if not is_market_open(key):
                     last = get_last_price(key)
                     if last is not None:
@@ -307,7 +316,6 @@ def generate_price_message(selections):
                     else:
                         lines.append(f"{emoji} {name} : ⛔ در دسترس نیست")
                 else:
-                    # بازار باز است اما قیمت دریافت نشد
                     lines.append(f"{emoji} {name} : ⛔ در دسترس نیست")
                 continue
             formatted = format_price(new_price, key)
