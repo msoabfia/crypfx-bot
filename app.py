@@ -29,7 +29,7 @@ CATEGORIES = {
         'name': 'واحد پولی(تومان)',
         'emoji': '💳',
         'symbols': [
-            ('usd', 'USD', '💵'),      # دلار جایگزین تتر شد
+            ('usd', 'USD', '💵'),
             ('aed', 'AED', '🇦🇪'),
         ]
     },
@@ -89,7 +89,7 @@ def get_all_symbols_list():
             all_keys.append(key)
     return all_keys
 
-# =============== توابع دریافت قیمت دلار و درهم از TGJU ===============
+# =============== توابع دریافت قیمت فقط از TGJU ===============
 
 def fetch_usd_price():
     """
@@ -150,7 +150,7 @@ def fetch_usd_price():
     except Exception as e:
         print(f"❌ اسکرپینگ TGJU: خطا - {e}")
     
-    print("❌ هیچ منبعی برای دلار پاسخ نداد.")
+    print("❌ قیمت دلار از TGJU در دسترس نیست.")
     return None
 
 def fetch_aed_price():
