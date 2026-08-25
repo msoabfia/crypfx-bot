@@ -89,65 +89,73 @@ def get_all_symbols_list():
             all_keys.append(key)
     return all_keys
 
-# =============== توابع دریافت قیمت از TGJU (API عمومی + اسکرپینگ) ===============
+# =============== توابع دریافت قیمت از منابع بین‌المللی ===============
 
 def fetch_usdt_price():
     """
-    دریافت قیمت تتر از TGJU (قیمت دلار به تومان)
-    اول از API عمومی، اگر نشد از اسکرپینگ با Regex جدید
+    دریافت قیمت تتر به تومان از دو منبع بین‌المللی:
+    1. CoinGecko: قیمت تتر به دلار
+    2. ExchangeRate.host: نرخ دلار به ریال
+    سپس محاسبه: قیمت تتر به تومان = (USDT/USD) × (USD/IRR) ÷ 10
     """
-    # روش اول: API عمومی TGJU
     try:
+        # 1. دریافت قیمت تتر به دلار از CoinGecko
         resp = requests.get(
-            'https://api.tgju.org/v1/market/price?symbol=price_usd',
+            'https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=usd',
             timeout=10
         )
-        if resp.status_code == 200:
-            data = resp.json()
-            price_rls = data.get('data', {}).get('price')
-            if price_rls:
-                return int(float(price_rls) / 10)  # ریال به تومان
-    except Exception as e:
-        print(f"⚠️ خطا در دریافت تتر از TGJU API: {e}")
-    
-    # روش دوم: اسکرپینگ با Regex جدید (در صورت تغییر ساختار)
-    try:
-        resp = cffi_requests.get(
-            'https://www.tgju.org/',
-            impersonate="chrome120",
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        usdt_usd = data.get('tether', {}).get('usd')
+        if not usdt_usd:
+            return None
+        
+        # 2. دریافت نرخ دلار به ریال از ExchangeRate.host
+        resp = requests.get(
+            'https://api.exchangerate.host/latest?base=USD&symbols=IRR',
             timeout=10
         )
-        if resp.status_code == 200:
-            # الگوی جدید برای قیمت دلار در ساختار فعلی
-            match = re.search(r'"price_usd":"([\d.]+)"', resp.text)
-            if match:
-                price_rls = float(match.group(1))
-                return int(price_rls / 10)
-            
-            # الگوی جایگزین (قیمت در تگ‌های خاص)
-            match = re.search(r'<span[^>]*id="usd"[^>]*>([\d,]+)</span>', resp.text)
-            if match:
-                price_rls = int(match.group(1).replace(',', ''))
-                return int(price_rls / 10)
-            
-            # الگوی عمومی (اگر ساختار خیلی تغییر کرد)
-            match = re.search(r'([\d,]+)\s*ریال', resp.text)
-            if match:
-                price_rls = int(match.group(1).replace(',', ''))
-                return int(price_rls / 10)
-    except Exception as e:
-        print(f"⚠️ خطا در اسکرپینگ TGJU: {e}")
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        usd_irr = data.get('rates', {}).get('IRR')
+        if not usd_irr:
+            return None
+        
+        # 3. محاسبه قیمت تتر به تومان
+        usdt_toman = (usdt_usd * usd_irr) / 10
+        return int(usdt_toman)
     
-    return None
+    except Exception as e:
+        print(f"⚠️ خطا در دریافت تتر: {e}")
+        return None
 
 def fetch_aed_price():
     """
-    دریافت قیمت درهم از TGJU (قیمت دلار ÷ ۳.۶۷)
+    دریافت قیمت درهم از طریق نرخ دلار:
+    قیمت درهم به تومان = (نرخ دلار به تومان) ÷ ۳.۶۷
     """
-    usd_toman = fetch_usdt_price()
-    if usd_toman:
-        return int(usd_toman / 3.67)
-    return None
+    try:
+        # دریافت نرخ دلار به ریال
+        resp = requests.get(
+            'https://api.exchangerate.host/latest?base=USD&symbols=IRR',
+            timeout=10
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        usd_irr = data.get('rates', {}).get('IRR')
+        if not usd_irr:
+            return None
+        
+        usd_toman = usd_irr / 10
+        aed_toman = usd_toman / 3.67
+        return int(aed_toman)
+    
+    except Exception as e:
+        print(f"⚠️ خطا در دریافت درهم: {e}")
+        return None
 
 def fetch_yahoo(symbol):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1h&range=1d"
