@@ -22,14 +22,14 @@ CHAT_ID = os.environ.get('CHAT_ID', '483833953')
 INTERVAL = 60
 TIMEOUT = 30
 
-logging.basicConfig(level=logging.ERROR)
+logging.basicConfig(level=logging.INFO)
 
 CATEGORIES = {
     'fiat': {
         'name': 'واحد پولی(تومان)',
         'emoji': '💳',
         'symbols': [
-            ('usdt', 'USDT', '💵'),
+            ('usd', 'USD', '💵'),      # دلار جایگزین تتر شد
             ('aed', 'AED', '🇦🇪'),
         ]
     },
@@ -89,91 +89,80 @@ def get_all_symbols_list():
             all_keys.append(key)
     return all_keys
 
-# =============== توابع دریافت قیمت از منابع بین‌المللی با پشتیبان ===============
+# =============== توابع دریافت قیمت دلار و درهم از TGJU ===============
 
-def get_usd_irr():
+def fetch_usd_price():
     """
-    دریافت نرخ دلار به ریال از چند منبع (با پشتیبان)
+    دریافت قیمت دلار از TGJU (به تومان)
+    اول از API عمومی، اگر نشد از اسکرپینگ
     """
-    # منبع اول: ExchangeRate.host
+    # روش اول: API عمومی TGJU
     try:
         resp = requests.get(
-            'https://api.exchangerate.host/latest?base=USD&symbols=IRR',
+            'https://api.tgju.org/v1/market/price?symbol=price_usd',
             timeout=10
         )
         if resp.status_code == 200:
             data = resp.json()
-            irr = data.get('rates', {}).get('IRR')
-            if irr:
-                return float(irr)
+            price_rls = data.get('data', {}).get('price')
+            if price_rls:
+                price_toman = int(float(price_rls) / 10)
+                print(f"✅ دلار از TGJU API: {price_toman:,} تومان")
+                return price_toman
+        else:
+            print(f"⚠️ TGJU API: کد {resp.status_code}")
     except Exception as e:
-        print(f"⚠️ ExchangeRate.host error: {e}")
+        print(f"❌ TGJU API: خطا - {e}")
     
-    # منبع دوم: CurrencyAPI (نیاز به API Key رایگان)
+    # روش دوم: اسکرپینگ
     try:
-        # کلید رایگان را می‌توانید از currencyapi.com بگیرید
-        api_key = os.environ.get('CURRENCY_API_KEY', '')
-        if api_key:
-            resp = requests.get(
-                f'https://api.currencyapi.com/v3/latest?apikey={api_key}&base=USD&currencies=IRR',
-                timeout=10
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                irr = data.get('data', {}).get('IRR', {}).get('value')
-                if irr:
-                    return float(irr)
-    except Exception as e:
-        print(f"⚠️ CurrencyAPI error: {e}")
-    
-    return None
-
-def fetch_usdt_price():
-    """
-    دریافت قیمت تتر به تومان از چند منبع (با پشتیبان)
-    """
-    # روش اول: CoinGecko برای قیمت تتر به دلار + نرخ دلار
-    try:
-        resp = requests.get(
-            'https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=usd',
+        resp = cffi_requests.get(
+            'https://www.tgju.org/',
+            impersonate="chrome120",
             timeout=10
         )
         if resp.status_code == 200:
-            data = resp.json()
-            usdt_usd = data.get('tether', {}).get('usd')
-            if usdt_usd:
-                usd_irr = get_usd_irr()
-                if usd_irr:
-                    return int((usdt_usd * usd_irr) / 10)
+            # الگوی جدید برای قیمت دلار
+            match = re.search(r'"price_usd":"([\d.]+)"', resp.text)
+            if match:
+                price_rls = float(match.group(1))
+                price_toman = int(price_rls / 10)
+                print(f"✅ دلار از اسکرپینگ TGJU: {price_toman:,} تومان")
+                return price_toman
+            
+            # الگوی جایگزین
+            match = re.search(r'<span[^>]*id="usd"[^>]*>([\d,]+)</span>', resp.text)
+            if match:
+                price_rls = int(match.group(1).replace(',', ''))
+                price_toman = int(price_rls / 10)
+                print(f"✅ دلار از اسکرپینگ TGJU: {price_toman:,} تومان")
+                return price_toman
+            
+            # الگوی عمومی (اگر ساختار خیلی تغییر کرد)
+            match = re.search(r'([\d,]+)\s*ریال', resp.text)
+            if match:
+                price_rls = int(match.group(1).replace(',', ''))
+                price_toman = int(price_rls / 10)
+                print(f"✅ دلار از اسکرپینگ TGJU: {price_toman:,} تومان")
+                return price_toman
+        else:
+            print(f"⚠️ اسکرپینگ TGJU: کد {resp.status_code}")
     except Exception as e:
-        print(f"⚠️ CoinGecko error: {e}")
+        print(f"❌ اسکرپینگ TGJU: خطا - {e}")
     
-    # روش دوم: Binance برای قیمت تتر به دلار + نرخ دلار
-    try:
-        resp = requests.get(
-            'https://api.binance.com/api/v3/ticker/price?symbol=USDTUSD',
-            timeout=10
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            usdt_usd = float(data.get('price', 0))
-            if usdt_usd:
-                usd_irr = get_usd_irr()
-                if usd_irr:
-                    return int((usdt_usd * usd_irr) / 10)
-    except Exception as e:
-        print(f"⚠️ Binance error: {e}")
-    
+    print("❌ هیچ منبعی برای دلار پاسخ نداد.")
     return None
 
 def fetch_aed_price():
     """
-    دریافت قیمت درهم از طریق نرخ دلار (با پشتیبان)
+    دریافت قیمت درهم از TGJU (قیمت دلار ÷ ۳.۶۷)
     """
-    usd_irr = get_usd_irr()
-    if usd_irr:
-        usd_toman = usd_irr / 10
-        return int(usd_toman / 3.67)
+    usd_toman = fetch_usd_price()
+    if usd_toman:
+        aed_toman = int(usd_toman / 3.67)
+        print(f"✅ درهم محاسبه شد: {aed_toman:,} تومان")
+        return aed_toman
+    print("❌ نرخ دلار برای محاسبه درهم در دسترس نیست.")
     return None
 
 def fetch_yahoo(symbol):
@@ -196,12 +185,12 @@ def fetch_yahoo(symbol):
                             return float(p)
         return None
     except Exception as e:
-        print(f"Error fetching {symbol}: {e}")
+        print(f"❌ Error fetching {symbol}: {e}")
         return None
 
 def fetch_price_from_source(symbol_key):
-    if symbol_key == 'usdt':
-        return fetch_usdt_price()
+    if symbol_key == 'usd':
+        return fetch_usd_price()
     elif symbol_key == 'aed':
         return fetch_aed_price()
     elif symbol_key == 'gram':
@@ -242,7 +231,7 @@ def fetch_price_from_source(symbol_key):
 def is_market_open(symbol_key):
     now = datetime.now()
     today = now.weekday()
-    if symbol_key in ['btc', 'eth', 'bnb', 'gram', 'xrp', 'sol', 'doge', 'bch', 'ltc', 'trx', 'dot', 'usdt', 'aed']:
+    if symbol_key in ['btc', 'eth', 'bnb', 'gram', 'xrp', 'sol', 'doge', 'bch', 'ltc', 'trx', 'dot', 'usd', 'aed']:
         return True
     if today == 6:
         return False
@@ -370,7 +359,7 @@ async def send_message(chat_id, text, parse_mode='Markdown', reply_markup=None):
 def format_price(price, symbol_key):
     if price is None:
         return "⛔ در دسترس نیست"
-    if symbol_key in ['usdt', 'aed']:
+    if symbol_key in ['usd', 'aed']:
         return f"{price:,.0f}"
     if symbol_key == 'gram':
         return f"{price:,.4f}"
@@ -593,7 +582,7 @@ async def doge(update, context): await status_single(update, 'doge', 'DOGE', '�
 async def bch(update, context): await status_single(update, 'bch', 'BCH', '🔶')
 async def ltc(update, context): await status_single(update, 'ltc', 'LTC', '⚡')
 async def trx(update, context): await status_single(update, 'trx', 'TRX', '🔴')
-async def usdt(update, context): await status_single(update, 'usdt', 'USDT', '💵')
+async def usd(update, context): await status_single(update, 'usd', 'USD', '💵')
 async def aed(update, context): await status_single(update, 'aed', 'AED', '🇦🇪')
 async def oil(update, context): await status_single(update, 'oil', 'OIL', '🛢️')
 async def brent(update, context): await status_single(update, 'brent', 'BRENT', '🛢️')
@@ -626,6 +615,7 @@ async def help_command(update, context):
         "/start - منوی اصلی\n"
         "/all - نمایش قیمت‌های انتخاب‌شده\n"
         "/status - وضعیت دیتابیس\n"
+        "/usd - قیمت دلار\n"
         "/aed - قیمت درهم امارات"
     )
 
@@ -673,7 +663,7 @@ def run_bot_in_main_thread():
     app.add_handler(CommandHandler("bch", bch))
     app.add_handler(CommandHandler("ltc", ltc))
     app.add_handler(CommandHandler("trx", trx))
-    app.add_handler(CommandHandler("usdt", usdt))
+    app.add_handler(CommandHandler("usd", usd))
     app.add_handler(CommandHandler("aed", aed))
     app.add_handler(CommandHandler("oil", oil))
     app.add_handler(CommandHandler("brent", brent))
