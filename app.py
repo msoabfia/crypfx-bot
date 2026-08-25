@@ -11,7 +11,7 @@ from curl_cffi import requests as cffi_requests
 from flask import Flask
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
-from telegram.error import TimedOut, NetworkError, BadRequest
+from telegram.error import TimedOut, NetworkError
 import logging
 import threading
 
@@ -76,10 +76,10 @@ CATEGORIES = {
     }
 }
 
-# =============== کش سراسری قیمت‌ها ===============
+# =============== کش سراسری قیمت‌ها (شامل old_price) ===============
 price_cache = {
-    'data': {},        # {symbol: price}
-    'last_update': 0,  # timestamp آخرین به‌روزرسانی
+    'data': {},        # {symbol: {'new': price, 'old': old_price}}
+    'last_update': 0,
     'lock': threading.Lock()
 }
 
@@ -92,6 +92,17 @@ def get_all_symbols_list():
 
 # =============== توابع دریافت قیمت از منابع ===============
 def fetch_usdt_price():
+    """دریافت قیمت تتر از نوبیتکس (به دلیل عدم پاسخگویی TGJU)"""
+    try:
+        resp = requests.get('https://api.nobitex.ir/market/stats?srcCurrency=usdt&dstCurrency=rls', timeout=8)
+        data = resp.json()
+        if data.get('stats') and 'USDT-IRT' in data['stats']:
+            price = data['stats']['USDT-IRT'].get('bestSell')
+            if price:
+                return int(float(price))
+    except:
+        pass
+    # پشتیبان: TGJU (با ایمپرسونیت)
     try:
         resp = cffi_requests.get('https://www.tgju.org/', impersonate="chrome120", timeout=8)
         if resp.status_code == 200:
@@ -102,14 +113,26 @@ def fetch_usdt_price():
                     return int(float(data['usd'].replace(',', '')))
                 elif 'price_usd' in data:
                     return int(float(data['price_usd'].replace(',', '')))
-        match = re.search(r'<span[^>]*class="price"[^>]*>([\d,]+)</span>', resp.text)
-        if match:
-            return int(match.group(1).replace(',', ''))
+            match = re.search(r'<span[^>]*class="price"[^>]*>([\d,]+)</span>', resp.text)
+            if match:
+                return int(match.group(1).replace(',', ''))
     except:
         pass
     return None
 
 def fetch_aed_price():
+    """دریافت قیمت درهم از نوبیتکس از طریق قیمت دلار"""
+    try:
+        resp = requests.get('https://api.nobitex.ir/market/stats?srcCurrency=usd&dstCurrency=rls', timeout=8)
+        data = resp.json()
+        if data.get('stats') and 'USD-IRT' in data['stats']:
+            price = data['stats']['USD-IRT'].get('bestSell')
+            if price:
+                usd_price = int(float(price))
+                return int(usd_price / 3.67)
+    except:
+        pass
+    # پشتیبان: از تابع fetch_usdt_price
     usd_price = fetch_usdt_price()
     if usd_price:
         return int(usd_price / 3.67)
@@ -227,9 +250,9 @@ def get_last_price(symbol):
     conn.close()
     return row[0] if row else None
 
-# =============== مدیریت کش (با ذخیره‌سازی در دیتابیس) ===============
+# =============== مدیریت کش (با ذخیره old_price) ===============
 def refresh_price_cache():
-    """دریافت قیمت همه نمادها، ذخیره در کش و دیتابیس (فقط یک بار در دقیقه)"""
+    """دریافت قیمت‌های جدید و ذخیره در کش به همراه قیمت قدیمی"""
     with price_cache['lock']:
         now = time.time()
         if now - price_cache['last_update'] < INTERVAL:
@@ -238,25 +261,27 @@ def refresh_price_cache():
         print(f"🔄 به‌روزرسانی کش قیمت‌ها در {datetime.now().isoformat()}")
         new_data = {}
         for symbol in get_all_symbols_list():
-            price = fetch_price_from_source(symbol)
-            if price is not None:
-                new_data[symbol] = price
-                # ذخیره در دیتابیس (فقط یک بار در هر به‌روزرسانی)
-                save_price(symbol, price)
+            old_price = get_last_price(symbol)  # قیمت قدیمی از دیتابیس
+            new_price = fetch_price_from_source(symbol)
+            if new_price is not None:
+                new_data[symbol] = {'new': new_price, 'old': old_price}
+                # ذخیره در دیتابیس (فقط قیمت جدید)
+                save_price(symbol, new_price)
+            else:
+                # اگر قیمت جدید دریافت نشد، از قیمت قدیمی استفاده کن (با old=همان)
+                if old_price is not None:
+                    new_data[symbol] = {'new': old_price, 'old': old_price}
         price_cache['data'] = new_data
         price_cache['last_update'] = now
 
-def get_cached_price(symbol):
-    """دریافت قیمت از کش (اگر کش منقضی شده باشد، ابتدا به‌روز می‌شود)"""
+def get_cached_price_with_old(symbol):
+    """دریافت قیمت جدید و قدیمی از کش (اگر کش منقضی شده باشد، به‌روز می‌شود)"""
     refresh_price_cache()
     with price_cache['lock']:
-        return price_cache['data'].get(symbol)
-
-def get_price_with_old(symbol_key):
-    """دریافت قیمت جدید از کش و قیمت قدیمی از دیتابیس (بدون ذخیره‌سازی مجدد)"""
-    old_price = get_last_price(symbol_key)
-    new_price = get_cached_price(symbol_key)
-    return new_price, old_price
+        data = price_cache['data'].get(symbol)
+        if data:
+            return data.get('new'), data.get('old')
+        return None, None
 
 # =============== توابع کاربری ===============
 def get_user_selections(user_id):
@@ -328,7 +353,7 @@ def format_price(price, symbol_key):
 def format_change(change):
     if change is None:
         return ""
-    if abs(change) < 0.001:
+    if abs(change) < 0.0001:  # تغییرات بسیار کوچک را نادیده بگیر
         return "➖ بدون تغییر"
     elif change > 0:
         return f"📈 {change:+.2f}%"
@@ -343,21 +368,22 @@ def generate_price_message(selections):
             continue
         lines.append(f"{cat['emoji']} {cat['name']}:")
         for key, name, emoji in cat_selected:
-            new_price, old_price = get_price_with_old(key)
+            new_price, old_price = get_cached_price_with_old(key)
+            # اگر قیمت جدید دریافت نشد، از آخرین قیمت دیتابیس استفاده کن
             if new_price is None:
-                if not is_market_open(key):
-                    last = get_last_price(key)
-                    if last is not None:
-                        formatted = format_price(last, key)
+                last = get_last_price(key)
+                if last is not None:
+                    formatted = format_price(last, key)
+                    if not is_market_open(key):
                         lines.append(f"{emoji} {name} : {formatted} 🔒 بازار بسته")
                     else:
-                        lines.append(f"{emoji} {name} : ⛔ در دسترس نیست")
+                        lines.append(f"{emoji} {name} : {formatted}")
                 else:
                     lines.append(f"{emoji} {name} : ⛔ در دسترس نیست")
                 continue
             formatted = format_price(new_price, key)
             change = None
-            if old_price and old_price > 0:
+            if old_price is not None and old_price > 0:
                 change = ((new_price - old_price) / old_price) * 100
             change_text = format_change(change)
             if change_text:
@@ -367,7 +393,7 @@ def generate_price_message(selections):
         lines.append("")
     return "\n".join(lines) if lines else "هیچ نمادی انتخاب نشده است."
 
-# =============== توابع ربات ===============
+# =============== توابع ربات (بدون تغییر) ===============
 async def show_main_menu(chat_id, user_id):
     text = "📊 **به ربات قیمت‌های لحظه‌ای خوش آمدید!**\n\n"
     text += "لطفاً یک دسته را انتخاب کنید:\n"
@@ -441,20 +467,9 @@ async def start(update, context):
 
 async def button_handler(update, context):
     query = update.callback_query
-    # پاسخ به query با try/except برای جلوگیری از خطای منقضی شدن
-    try:
-        await query.answer()
-    except BadRequest as e:
-        print(f"⚠️ خطا در پاسخ به query: {e}")
-        # اگر query منقضی شده، همچنان می‌توانیم عملیات را ادامه دهیم
-        # اما ممکن است نتوانیم پیام را ویرایش کنیم، پس از chat_id و message_id استفاده می‌کنیم
-        chat_id = query.message.chat.id
-        message_id = query.message.message_id
-    else:
-        chat_id = query.message.chat.id
-        message_id = query.message.message_id
-
+    await query.answer()
     user_id = query.from_user.id
+    chat_id = query.message.chat.id
     data = query.data
 
     if data == "back_categories":
@@ -465,21 +480,12 @@ async def button_handler(update, context):
         return
     if data == "clear_all":
         clear_user_selections(user_id)
-        # ویرایش پیام با استفاده از chat_id و message_id
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text="🗑️ همه انتخاب‌ها پاک شد."
-        )
+        await query.edit_message_text("🗑️ همه انتخاب‌ها پاک شد.")
         await show_main_menu(chat_id, user_id)
         return
     if data == "select_all":
         select_all_symbols(user_id)
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text="📊 همه نمادها انتخاب شدند."
-        )
+        await query.edit_message_text("📊 همه نمادها انتخاب شدند.")
         await show_all_symbols(chat_id, user_id)
         return
     if data == "show_all":
@@ -494,40 +500,21 @@ async def button_handler(update, context):
         cat = CATEGORIES[category_key]
         for key, _, _ in cat['symbols']:
             save_user_selection(user_id, key)
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=f"📊 همه نمادهای {cat['name']} انتخاب شدند."
-        )
+        await query.edit_message_text(f"📊 همه نمادهای {cat['name']} انتخاب شدند.")
         await show_category_symbols(chat_id, user_id, category_key)
         return
     if data == "start_sending":
         selections = get_user_selections(user_id)
         if not selections:
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text="⚠️ حداقل یک نماد انتخاب کنید.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_categories")]])
-            )
+            await query.edit_message_text("⚠️ حداقل یک نماد انتخاب کنید.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_categories")]]))
             return
         sending_active[user_id] = True
         last_sent_summary[user_id] = ""
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text="🚀 **ارسال خودکار شروع شد!**\nهر ۱ دقیقه قیمت‌های انتخاب‌شده ارسال می‌شود.",
-            parse_mode='Markdown'
-        )
+        await query.edit_message_text("🚀 **ارسال خودکار شروع شد!**\nهر ۱ دقیقه قیمت‌های انتخاب‌شده ارسال می‌شود.", parse_mode='Markdown')
         return
     if data == "stop_sending":
         sending_active[user_id] = False
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text="🛑 **ارسال خودکار متوقف شد.**",
-            parse_mode='Markdown'
-        )
+        await query.edit_message_text("🛑 **ارسال خودکار متوقف شد.**", parse_mode='Markdown')
         return
     if data.startswith("toggle_"):
         symbol = data.replace("toggle_", "")
@@ -541,23 +528,23 @@ async def button_handler(update, context):
 
 async def status_single(update, symbol_key, name, emoji):
     chat_id = update.effective_chat.id
-    new_price, old_price = get_price_with_old(symbol_key)
+    new_price, old_price = get_cached_price_with_old(symbol_key)
 
     if new_price is None:
-        if not is_market_open(symbol_key):
-            last = get_last_price(symbol_key)
-            if last is not None:
-                formatted = format_price(last, symbol_key)
+        last = get_last_price(symbol_key)
+        if last is not None:
+            formatted = format_price(last, symbol_key)
+            if not is_market_open(symbol_key):
                 await send_message(chat_id, f"{emoji} **{name}**\n💰 {formatted}\n🔒 بازار بسته", parse_mode='Markdown')
             else:
-                await send_message(chat_id, f"{emoji} {name}: ⛔ در دسترس نیست.")
+                await send_message(chat_id, f"{emoji} **{name}**\n💰 {formatted}", parse_mode='Markdown')
         else:
             await send_message(chat_id, f"{emoji} {name}: ⛔ در دسترس نیست.")
         return
 
     formatted = format_price(new_price, symbol_key)
     change = None
-    if old_price and old_price > 0:
+    if old_price is not None and old_price > 0:
         change = ((new_price - old_price) / old_price) * 100
     change_text = format_change(change)
     if change_text:
