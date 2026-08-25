@@ -89,73 +89,92 @@ def get_all_symbols_list():
             all_keys.append(key)
     return all_keys
 
-# =============== توابع دریافت قیمت از منابع بین‌المللی ===============
+# =============== توابع دریافت قیمت از منابع بین‌المللی با پشتیبان ===============
+
+def get_usd_irr():
+    """
+    دریافت نرخ دلار به ریال از چند منبع (با پشتیبان)
+    """
+    # منبع اول: ExchangeRate.host
+    try:
+        resp = requests.get(
+            'https://api.exchangerate.host/latest?base=USD&symbols=IRR',
+            timeout=10
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            irr = data.get('rates', {}).get('IRR')
+            if irr:
+                return float(irr)
+    except Exception as e:
+        print(f"⚠️ ExchangeRate.host error: {e}")
+    
+    # منبع دوم: CurrencyAPI (نیاز به API Key رایگان)
+    try:
+        # کلید رایگان را می‌توانید از currencyapi.com بگیرید
+        api_key = os.environ.get('CURRENCY_API_KEY', '')
+        if api_key:
+            resp = requests.get(
+                f'https://api.currencyapi.com/v3/latest?apikey={api_key}&base=USD&currencies=IRR',
+                timeout=10
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                irr = data.get('data', {}).get('IRR', {}).get('value')
+                if irr:
+                    return float(irr)
+    except Exception as e:
+        print(f"⚠️ CurrencyAPI error: {e}")
+    
+    return None
 
 def fetch_usdt_price():
     """
-    دریافت قیمت تتر به تومان از دو منبع بین‌المللی:
-    1. CoinGecko: قیمت تتر به دلار
-    2. ExchangeRate.host: نرخ دلار به ریال
-    سپس محاسبه: قیمت تتر به تومان = (USDT/USD) × (USD/IRR) ÷ 10
+    دریافت قیمت تتر به تومان از چند منبع (با پشتیبان)
     """
+    # روش اول: CoinGecko برای قیمت تتر به دلار + نرخ دلار
     try:
-        # 1. دریافت قیمت تتر به دلار از CoinGecko
         resp = requests.get(
             'https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=usd',
             timeout=10
         )
-        if resp.status_code != 200:
-            return None
-        data = resp.json()
-        usdt_usd = data.get('tether', {}).get('usd')
-        if not usdt_usd:
-            return None
-        
-        # 2. دریافت نرخ دلار به ریال از ExchangeRate.host
+        if resp.status_code == 200:
+            data = resp.json()
+            usdt_usd = data.get('tether', {}).get('usd')
+            if usdt_usd:
+                usd_irr = get_usd_irr()
+                if usd_irr:
+                    return int((usdt_usd * usd_irr) / 10)
+    except Exception as e:
+        print(f"⚠️ CoinGecko error: {e}")
+    
+    # روش دوم: Binance برای قیمت تتر به دلار + نرخ دلار
+    try:
         resp = requests.get(
-            'https://api.exchangerate.host/latest?base=USD&symbols=IRR',
+            'https://api.binance.com/api/v3/ticker/price?symbol=USDTUSD',
             timeout=10
         )
-        if resp.status_code != 200:
-            return None
-        data = resp.json()
-        usd_irr = data.get('rates', {}).get('IRR')
-        if not usd_irr:
-            return None
-        
-        # 3. محاسبه قیمت تتر به تومان
-        usdt_toman = (usdt_usd * usd_irr) / 10
-        return int(usdt_toman)
-    
+        if resp.status_code == 200:
+            data = resp.json()
+            usdt_usd = float(data.get('price', 0))
+            if usdt_usd:
+                usd_irr = get_usd_irr()
+                if usd_irr:
+                    return int((usdt_usd * usd_irr) / 10)
     except Exception as e:
-        print(f"⚠️ خطا در دریافت تتر: {e}")
-        return None
+        print(f"⚠️ Binance error: {e}")
+    
+    return None
 
 def fetch_aed_price():
     """
-    دریافت قیمت درهم از طریق نرخ دلار:
-    قیمت درهم به تومان = (نرخ دلار به تومان) ÷ ۳.۶۷
+    دریافت قیمت درهم از طریق نرخ دلار (با پشتیبان)
     """
-    try:
-        # دریافت نرخ دلار به ریال
-        resp = requests.get(
-            'https://api.exchangerate.host/latest?base=USD&symbols=IRR',
-            timeout=10
-        )
-        if resp.status_code != 200:
-            return None
-        data = resp.json()
-        usd_irr = data.get('rates', {}).get('IRR')
-        if not usd_irr:
-            return None
-        
+    usd_irr = get_usd_irr()
+    if usd_irr:
         usd_toman = usd_irr / 10
-        aed_toman = usd_toman / 3.67
-        return int(aed_toman)
-    
-    except Exception as e:
-        print(f"⚠️ خطا در دریافت درهم: {e}")
-        return None
+        return int(usd_toman / 3.67)
+    return None
 
 def fetch_yahoo(symbol):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1h&range=1d"
