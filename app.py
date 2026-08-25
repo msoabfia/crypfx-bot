@@ -89,74 +89,65 @@ def get_all_symbols_list():
             all_keys.append(key)
     return all_keys
 
-# =============== توابع دریافت قیمت فقط از TGJU ===============
+# =============== توابع دریافت قیمت از TGJU (API عمومی + اسکرپینگ) ===============
 
 def fetch_usdt_price():
     """
     دریافت قیمت تتر از TGJU (قیمت دلار به تومان)
+    اول از API عمومی، اگر نشد از اسکرپینگ با Regex جدید
     """
+    # روش اول: API عمومی TGJU
+    try:
+        resp = requests.get(
+            'https://api.tgju.org/v1/market/price?symbol=price_usd',
+            timeout=10
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            price_rls = data.get('data', {}).get('price')
+            if price_rls:
+                return int(float(price_rls) / 10)  # ریال به تومان
+    except Exception as e:
+        print(f"⚠️ خطا در دریافت تتر از TGJU API: {e}")
+    
+    # روش دوم: اسکرپینگ با Regex جدید (در صورت تغییر ساختار)
     try:
         resp = cffi_requests.get(
             'https://www.tgju.org/',
             impersonate="chrome120",
             timeout=10
         )
-        if resp.status_code != 200:
-            return None
-        
-        # روش اول: جستجوی JSON قیمت‌ها
-        match = re.search(r'var\s+priceJson\s*=\s*({.*?});', resp.text, re.DOTALL)
-        if match:
-            data = json.loads(match.group(1))
-            if 'price_usd' in data:
-                price_rls = float(data['price_usd'].replace(',', ''))
-                return int(price_rls / 10)  # تبدیل ریال به تومان
-        
-        # روش دوم: جستجوی مستقیم در صفحه
-        match = re.search(r'<span[^>]*class="price"[^>]*>([\d,]+)</span>', resp.text)
-        if match:
-            price_rls = int(match.group(1).replace(',', ''))
-            return int(price_rls / 10)
-        
-        return None
+        if resp.status_code == 200:
+            # الگوی جدید برای قیمت دلار در ساختار فعلی
+            match = re.search(r'"price_usd":"([\d.]+)"', resp.text)
+            if match:
+                price_rls = float(match.group(1))
+                return int(price_rls / 10)
+            
+            # الگوی جایگزین (قیمت در تگ‌های خاص)
+            match = re.search(r'<span[^>]*id="usd"[^>]*>([\d,]+)</span>', resp.text)
+            if match:
+                price_rls = int(match.group(1).replace(',', ''))
+                return int(price_rls / 10)
+            
+            # الگوی عمومی (اگر ساختار خیلی تغییر کرد)
+            match = re.search(r'([\d,]+)\s*ریال', resp.text)
+            if match:
+                price_rls = int(match.group(1).replace(',', ''))
+                return int(price_rls / 10)
     except Exception as e:
-        print(f"⚠️ خطا در دریافت تتر از TGJU: {e}")
-        return None
+        print(f"⚠️ خطا در اسکرپینگ TGJU: {e}")
+    
+    return None
 
 def fetch_aed_price():
     """
-    دریافت قیمت درهم از TGJU (قیمت دلار به تومان ÷ ۳.۶۷)
+    دریافت قیمت درهم از TGJU (قیمت دلار ÷ ۳.۶۷)
     """
-    try:
-        # ابتدا قیمت دلار را از TGJU می‌گیریم
-        resp = cffi_requests.get(
-            'https://www.tgju.org/',
-            impersonate="chrome120",
-            timeout=10
-        )
-        if resp.status_code != 200:
-            return None
-        
-        # روش اول: جستجوی JSON قیمت‌ها
-        match = re.search(r'var\s+priceJson\s*=\s*({.*?});', resp.text, re.DOTALL)
-        if match:
-            data = json.loads(match.group(1))
-            if 'price_usd' in data:
-                price_rls = float(data['price_usd'].replace(',', ''))
-                usd_toman = price_rls / 10
-                return int(usd_toman / 3.67)
-        
-        # روش دوم: جستجوی مستقیم در صفحه
-        match = re.search(r'<span[^>]*class="price"[^>]*>([\d,]+)</span>', resp.text)
-        if match:
-            price_rls = int(match.group(1).replace(',', ''))
-            usd_toman = price_rls / 10
-            return int(usd_toman / 3.67)
-        
-        return None
-    except Exception as e:
-        print(f"⚠️ خطا در دریافت درهم از TGJU: {e}")
-        return None
+    usd_toman = fetch_usdt_price()
+    if usd_toman:
+        return int(usd_toman / 3.67)
+    return None
 
 def fetch_yahoo(symbol):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1h&range=1d"
