@@ -11,7 +11,7 @@ from curl_cffi import requests as cffi_requests
 from flask import Flask
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
-from telegram.error import TimedOut, NetworkError
+from telegram.error import TimedOut, NetworkError, BadRequest
 import logging
 import threading
 
@@ -441,9 +441,20 @@ async def start(update, context):
 
 async def button_handler(update, context):
     query = update.callback_query
-    await query.answer()
+    # پاسخ به query با try/except برای جلوگیری از خطای منقضی شدن
+    try:
+        await query.answer()
+    except BadRequest as e:
+        print(f"⚠️ خطا در پاسخ به query: {e}")
+        # اگر query منقضی شده، همچنان می‌توانیم عملیات را ادامه دهیم
+        # اما ممکن است نتوانیم پیام را ویرایش کنیم، پس از chat_id و message_id استفاده می‌کنیم
+        chat_id = query.message.chat.id
+        message_id = query.message.message_id
+    else:
+        chat_id = query.message.chat.id
+        message_id = query.message.message_id
+
     user_id = query.from_user.id
-    chat_id = query.message.chat.id
     data = query.data
 
     if data == "back_categories":
@@ -454,12 +465,21 @@ async def button_handler(update, context):
         return
     if data == "clear_all":
         clear_user_selections(user_id)
-        await query.edit_message_text("🗑️ همه انتخاب‌ها پاک شد.")
+        # ویرایش پیام با استفاده از chat_id و message_id
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text="🗑️ همه انتخاب‌ها پاک شد."
+        )
         await show_main_menu(chat_id, user_id)
         return
     if data == "select_all":
         select_all_symbols(user_id)
-        await query.edit_message_text("📊 همه نمادها انتخاب شدند.")
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text="📊 همه نمادها انتخاب شدند."
+        )
         await show_all_symbols(chat_id, user_id)
         return
     if data == "show_all":
@@ -474,21 +494,40 @@ async def button_handler(update, context):
         cat = CATEGORIES[category_key]
         for key, _, _ in cat['symbols']:
             save_user_selection(user_id, key)
-        await query.edit_message_text(f"📊 همه نمادهای {cat['name']} انتخاب شدند.")
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=f"📊 همه نمادهای {cat['name']} انتخاب شدند."
+        )
         await show_category_symbols(chat_id, user_id, category_key)
         return
     if data == "start_sending":
         selections = get_user_selections(user_id)
         if not selections:
-            await query.edit_message_text("⚠️ حداقل یک نماد انتخاب کنید.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_categories")]]))
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text="⚠️ حداقل یک نماد انتخاب کنید.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_categories")]])
+            )
             return
         sending_active[user_id] = True
         last_sent_summary[user_id] = ""
-        await query.edit_message_text("🚀 **ارسال خودکار شروع شد!**\nهر ۱ دقیقه قیمت‌های انتخاب‌شده ارسال می‌شود.", parse_mode='Markdown')
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text="🚀 **ارسال خودکار شروع شد!**\nهر ۱ دقیقه قیمت‌های انتخاب‌شده ارسال می‌شود.",
+            parse_mode='Markdown'
+        )
         return
     if data == "stop_sending":
         sending_active[user_id] = False
-        await query.edit_message_text("🛑 **ارسال خودکار متوقف شد.**", parse_mode='Markdown')
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text="🛑 **ارسال خودکار متوقف شد.**",
+            parse_mode='Markdown'
+        )
         return
     if data.startswith("toggle_"):
         symbol = data.replace("toggle_", "")
