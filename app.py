@@ -89,72 +89,73 @@ def get_all_symbols_list():
             all_keys.append(key)
     return all_keys
 
-# =============== توابع دریافت قیمت (بین‌المللی) ===============
+# =============== توابع دریافت قیمت فقط از TGJU ===============
 
 def fetch_usdt_price():
     """
-    دریافت قیمت تتر به تومان از دو منبع بین‌المللی:
-    1. CoinGecko: قیمت تتر به دلار
-    2. ExchangeRate.host: نرخ دلار به ریال
-    سپس محاسبه: قیمت تتر به تومان = (USDT/USD) × (USD/IRR) ÷ 10
+    دریافت قیمت تتر از TGJU (قیمت دلار به تومان)
     """
     try:
-        # 1. دریافت قیمت تتر به دلار از CoinGecko
-        resp = requests.get(
-            'https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=usd',
+        resp = cffi_requests.get(
+            'https://www.tgju.org/',
+            impersonate="chrome120",
             timeout=10
         )
         if resp.status_code != 200:
             return None
-        data = resp.json()
-        usdt_usd = data.get('tether', {}).get('usd')
-        if not usdt_usd:
-            return None
         
-        # 2. دریافت نرخ دلار به ریال از ExchangeRate.host
-        resp = requests.get(
-            'https://api.exchangerate.host/latest?base=USD&symbols=IRR',
-            timeout=10
-        )
-        if resp.status_code != 200:
-            return None
-        data = resp.json()
-        usd_irr = data.get('rates', {}).get('IRR')
-        if not usd_irr:
-            return None
+        # روش اول: جستجوی JSON قیمت‌ها
+        match = re.search(r'var\s+priceJson\s*=\s*({.*?});', resp.text, re.DOTALL)
+        if match:
+            data = json.loads(match.group(1))
+            if 'price_usd' in data:
+                price_rls = float(data['price_usd'].replace(',', ''))
+                return int(price_rls / 10)  # تبدیل ریال به تومان
         
-        # 3. محاسبه قیمت تتر به تومان
-        usdt_toman = (usdt_usd * usd_irr) / 10
-        return int(usdt_toman)
-    
+        # روش دوم: جستجوی مستقیم در صفحه
+        match = re.search(r'<span[^>]*class="price"[^>]*>([\d,]+)</span>', resp.text)
+        if match:
+            price_rls = int(match.group(1).replace(',', ''))
+            return int(price_rls / 10)
+        
+        return None
     except Exception as e:
-        print(f"⚠️ خطا در دریافت تتر: {e}")
+        print(f"⚠️ خطا در دریافت تتر از TGJU: {e}")
         return None
 
 def fetch_aed_price():
     """
-    دریافت قیمت درهم از طریق نرخ دلار:
-    قیمت درهم به تومان = (نرخ دلار به تومان) ÷ ۳.۶۷
+    دریافت قیمت درهم از TGJU (قیمت دلار به تومان ÷ ۳.۶۷)
     """
     try:
-        # دریافت نرخ دلار به ریال
-        resp = requests.get(
-            'https://api.exchangerate.host/latest?base=USD&symbols=IRR',
+        # ابتدا قیمت دلار را از TGJU می‌گیریم
+        resp = cffi_requests.get(
+            'https://www.tgju.org/',
+            impersonate="chrome120",
             timeout=10
         )
         if resp.status_code != 200:
             return None
-        data = resp.json()
-        usd_irr = data.get('rates', {}).get('IRR')
-        if not usd_irr:
-            return None
         
-        usd_toman = usd_irr / 10
-        aed_toman = usd_toman / 3.67
-        return int(aed_toman)
-    
+        # روش اول: جستجوی JSON قیمت‌ها
+        match = re.search(r'var\s+priceJson\s*=\s*({.*?});', resp.text, re.DOTALL)
+        if match:
+            data = json.loads(match.group(1))
+            if 'price_usd' in data:
+                price_rls = float(data['price_usd'].replace(',', ''))
+                usd_toman = price_rls / 10
+                return int(usd_toman / 3.67)
+        
+        # روش دوم: جستجوی مستقیم در صفحه
+        match = re.search(r'<span[^>]*class="price"[^>]*>([\d,]+)</span>', resp.text)
+        if match:
+            price_rls = int(match.group(1).replace(',', ''))
+            usd_toman = price_rls / 10
+            return int(usd_toman / 3.67)
+        
+        return None
     except Exception as e:
-        print(f"⚠️ خطا در دریافت درهم: {e}")
+        print(f"⚠️ خطا در دریافت درهم از TGJU: {e}")
         return None
 
 def fetch_yahoo(symbol):
