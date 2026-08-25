@@ -108,12 +108,10 @@ def fetch_yahoo(symbol):
         data = resp.json()
         if 'chart' in data and 'result' in data['chart'] and len(data['chart']['result']) > 0:
             result = data['chart']['result'][0]
-            # اولویت با regularMarketPrice
             if 'meta' in result and 'regularMarketPrice' in result['meta']:
                 price = result['meta']['regularMarketPrice']
                 if price is not None:
                     return float(price)
-            # اگر نبود، از indicators استفاده کن
             if 'indicators' in result and 'quote' in result['indicators'] and len(result['indicators']['quote']) > 0:
                 quote = result['indicators']['quote'][0]
                 if 'close' in quote and quote['close']:
@@ -133,7 +131,8 @@ def get_price(symbol_key):
     elif symbol_key == 'aed':
         return fetch_aed_price()
     elif symbol_key == 'gram':
-        return fetch_yahoo('TON-USD')
+        # استفاده از نماد دقیق GRAM-USD در یاهو
+        return fetch_yahoo('GRAM-USD')
     elif symbol_key == 'btc':
         return fetch_yahoo('BTC-USD')
     elif symbol_key == 'eth':
