@@ -1,29 +1,31 @@
 import os
-os.environ['TZ'] = 'UTC'
-import asyncio
 import time
-import sqlite3
-import requests
-import re
 import json
+import sqlite3
+import re
+import threading
+import asyncio
+import logging
 from datetime import datetime
+
+import requests
 from curl_cffi import requests as cffi_requests
 from flask import Flask
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
-from telegram.error import TimedOut, NetworkError
-import logging
-import threading
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 
+# ==================== 配置 ====================
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN environment variable not set!")
-CHAT_ID = os.environ.get('CHAT_ID', '483833953')
+
 INTERVAL = 60
 TIMEOUT = 30
+CACHE_TTL = 60  # 缓存有效期（秒）
 
 logging.basicConfig(level=logging.ERROR)
 
+# ==================== 数据分类 ====================
 CATEGORIES = {
     'fiat': {
         'name': 'واحد پولی(تومان)',
@@ -75,32 +77,84 @@ CATEGORIES = {
     }
 }
 
+# ==================== 缓存 ====================
+_price_cache = {
+    'usdt': {'price': None, 'timestamp': 0},
+    'aed': {'price': None, 'timestamp': 0},
+}
+
+def is_cache_valid(symbol: str) -> bool:
+    """检查指定币种的缓存是否有效"""
+    if symbol not in _price_cache:
+        return False
+    entry = _price_cache[symbol]
+    if entry['price'] is None:
+        return False
+    return (time.time() - entry['timestamp']) < CACHE_TTL
+
+def get_cached_price(symbol: str):
+    """获取缓存的 price，若无有效缓存则返回 None"""
+    if not is_cache_valid(symbol):
+        return None
+    return _price_cache[symbol]['price']
+
+def set_cached_price(symbol: str, price):
+    """更新缓存"""
+    _price_cache[symbol] = {'price': price, 'timestamp': time.time()}
+
+# ==================== 价格获取函数 ====================
 def fetch_usdt_price():
-    """دریافت قیمت تتر از TGJU با استفاده از API داخلی"""
+    """
+    从 Nobitex API 获取 USDT/IRT 的最新价格
+    返回: 价格（以 Toman 为单位），若失败则返回 None
+    """
+    # 1. 检查缓存
+    cached = get_cached_price('usdt')
+    if cached is not None:
+        return cached
+
+    # 2. 调用 API
+    url = "https://api.nobitex.ir/market/stats?srcCurrency=usdt&dstCurrency=rls"
     try:
-        resp = cffi_requests.get('https://www.tgju.org/', impersonate="chrome120", timeout=8)
+        resp = requests.get(url, timeout=8)
         if resp.status_code == 200:
-            match = re.search(r'var\s+priceJson\s*=\s*({.*?});', resp.text, re.DOTALL)
-            if match:
-                data = json.loads(match.group(1))
-                if 'usd' in data:
-                    return int(float(data['usd'].replace(',', '')))
-                elif 'price_usd' in data:
-                    return int(float(data['price_usd'].replace(',', '')))
-        match = re.search(r'<span[^>]*class="price"[^>]*>([\d,]+)</span>', resp.text)
-        if match:
-            return int(match.group(1).replace(',', ''))
-    except:
-        pass
-    return None
+            data = resp.json()
+            # 响应结构: { "stats": { "USDT-IRT": { "latest": "..." } } }
+            if data.get('stats') and 'USDT-IRT' in data['stats']:
+                latest = data['stats']['USDT-IRT'].get('latest')
+                if latest is not None:
+                    price_irr = float(latest)
+                    price_toman = int(price_irr / 10)  # IRR → Toman
+                    set_cached_price('usdt', price_toman)
+                    return price_toman
+    except Exception as e:
+        # API 调用失败，不崩溃，返回缓存（如果有）
+        logging.error(f"Nobitex API error: {e}")
+
+    # 3. 若 API 失败，返回缓存中的旧数据（可能已过期）
+    old = _price_cache['usdt']['price']
+    return old  # 可能为 None
 
 def fetch_aed_price():
-    usd_price = fetch_usdt_price()
-    if usd_price:
-        return int(usd_price / 3.67)
-    return None
+    """
+    获取 AED 价格：优先从缓存读取，若无效则通过 USDT 价格换算
+    """
+    cached = get_cached_price('aed')
+    if cached is not None:
+        return cached
+
+    usdt_price = fetch_usdt_price()
+    if usdt_price is not None:
+        # 假设 1 AED ≈ 1/3.67 USD，且 1 USD ≈ USDT 价格
+        aed_price = int(usdt_price / 3.67)
+        set_cached_price('aed', aed_price)
+        return aed_price
+
+    # 若 USDT 获取失败，返回缓存的 AED（若有）
+    return _price_cache['aed']['price']
 
 def fetch_yahoo(symbol):
+    """从 Yahoo Finance 获取价格（其他币种）"""
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1h&range=1d"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"}
     try:
@@ -120,19 +174,20 @@ def fetch_yahoo(symbol):
                             return float(p)
         return None
     except Exception as e:
-        print(f"Error fetching {symbol}: {e}")
+        logging.error(f"Yahoo fetch error for {symbol}: {e}")
         return None
 
 def get_price(symbol_key):
+    """统一价格获取入口"""
     if not is_market_open(symbol_key):
         return None
+
     if symbol_key == 'usdt':
         return fetch_usdt_price()
     elif symbol_key == 'aed':
         return fetch_aed_price()
     elif symbol_key == 'gram':
-        # استفاده از نماد دقیق GRAM-USD در یاهو
-        return fetch_yahoo('GRAM-USD')
+        return fetch_yahoo('GRAM-USD')  # 按您之前确认的符号
     elif symbol_key == 'btc':
         return fetch_yahoo('BTC-USD')
     elif symbol_key == 'eth':
@@ -166,6 +221,7 @@ def get_price(symbol_key):
         return round(price / 100, 4) if price else None
     return None
 
+# ==================== 市场状态 ====================
 def is_market_open(symbol_key):
     now = datetime.now()
     today = now.weekday()
@@ -184,6 +240,7 @@ def is_market_open(symbol_key):
         return False
     return True
 
+# ==================== 数据库 ====================
 DB_PATH = "market_data.db"
 
 def init_db():
@@ -253,6 +310,7 @@ def select_all_symbols(user_id):
     conn.commit()
     conn.close()
 
+# ==================== Telegram 机器人核心 ====================
 sending_active = {}
 last_sent_summary = {}
 
@@ -329,6 +387,7 @@ def generate_price_message(selections):
         lines.append("")
     return "\n".join(lines) if lines else "هیچ نمادی انتخاب نشده است."
 
+# ==================== 菜单与交互 ====================
 async def show_main_menu(chat_id, user_id):
     text = "📊 **به ربات قیمت‌های لحظه‌ای خوش آمدید!**\n\n"
     text += "لطفاً یک دسته را انتخاب کنید:\n"
@@ -395,6 +454,7 @@ async def show_all_symbols(chat_id, user_id):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await send_message(chat_id, text, parse_mode='Markdown', reply_markup=reply_markup)
 
+# ==================== 命令与回调 ====================
 async def start(update, context):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
@@ -487,6 +547,7 @@ async def status_single(update, symbol_key, name, emoji):
     else:
         await send_message(chat_id, f"{emoji} **{name}**\n💰 {formatted}", parse_mode='Markdown')
 
+# ==================== 独立命令 ====================
 async def gold(update, context): await status_single(update, 'gold', 'GOLD', '🏆')
 async def silver(update, context): await status_single(update, 'silver', 'SILVER', '🥈')
 async def btc(update, context): await status_single(update, 'btc', 'BTC', '₿')
@@ -535,6 +596,7 @@ async def help_command(update, context):
         "/aed - قیمت درهم امارات"
     )
 
+# ==================== 自动发送循环 ====================
 async def auto_send_loop():
     bot = Bot(token=TELEGRAM_TOKEN)
     while True:
@@ -556,12 +618,28 @@ async def auto_send_loop():
                     last_sent_summary[user_id] = message
             await asyncio.sleep(INTERVAL)
         except Exception as e:
-            print(f"⚠️ خطا در حلقه خودکار: {e}")
+            logging.error(f"Auto send loop error: {e}")
             await asyncio.sleep(INTERVAL)
 
 def start_auto_send():
     asyncio.run(auto_send_loop())
 
+# ==================== Flask Web 服务 ====================
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def home():
+    return "✅ ربات در حال اجراست!"
+
+@flask_app.route('/health')
+def health():
+    return "OK"
+
+def run_flask():
+    port = int(os.environ.get('PORT', 10000))
+    flask_app.run(host='0.0.0.0', port=port)
+
+# ==================== 启动机器人 ====================
 def run_bot_in_main_thread():
     app = Application.builder().token(TELEGRAM_TOKEN).connect_timeout(TIMEOUT).read_timeout(TIMEOUT).build()
     app.add_handler(CommandHandler("start", start))
@@ -589,20 +667,6 @@ def run_bot_in_main_thread():
     app.add_handler(CallbackQueryHandler(button_handler))
     print("🤖 ربات در حال اجرا...")
     app.run_polling()
-
-flask_app = Flask(__name__)
-
-@flask_app.route('/')
-def home():
-    return "✅ ربات در حال اجراست!"
-
-@flask_app.route('/health')
-def health():
-    return "OK"
-
-def run_flask():
-    port = int(os.environ.get('PORT', 10000))
-    flask_app.run(host='0.0.0.0', port=port)
 
 if __name__ == '__main__':
     init_db()
