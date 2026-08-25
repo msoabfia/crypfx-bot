@@ -92,77 +92,46 @@ def get_all_symbols_list():
 # =============== توابع دریافت قیمت فقط از TGJU ===============
 
 def fetch_usd_price():
-    """
-    دریافت قیمت دلار از TGJU (به تومان)
-    اول از API عمومی، اگر نشد از اسکرپینگ
-    """
-    # روش اول: API عمومی TGJU
+    """دریافت قیمت دلار از TGJU (به تومان)"""
+    # روش اول: API عمومی
     try:
-        resp = requests.get(
-            'https://api.tgju.org/v1/market/price?symbol=price_usd',
-            timeout=10
-        )
+        resp = requests.get('https://api.tgju.org/v1/market/price?symbol=price_usd', timeout=10)
         if resp.status_code == 200:
             data = resp.json()
             price_rls = data.get('data', {}).get('price')
             if price_rls:
-                price_toman = int(float(price_rls) / 10)
-                print(f"✅ دلار از TGJU API: {price_toman:,} تومان")
-                return price_toman
-        else:
-            print(f"⚠️ TGJU API: کد {resp.status_code}")
+                toman = int(float(price_rls) / 10)
+                print(f"✅ دلار از TGJU API: {toman:,} تومان")
+                return toman
     except Exception as e:
-        print(f"❌ TGJU API: خطا - {e}")
+        print(f"❌ TGJU API: {e}")
     
     # روش دوم: اسکرپینگ
     try:
-        resp = cffi_requests.get(
-            'https://www.tgju.org/',
-            impersonate="chrome120",
-            timeout=10
-        )
+        resp = cffi_requests.get('https://www.tgju.org/', impersonate="chrome120", timeout=10)
         if resp.status_code == 200:
-            # الگوی جدید برای قیمت دلار
             match = re.search(r'"price_usd":"([\d.]+)"', resp.text)
             if match:
-                price_rls = float(match.group(1))
-                price_toman = int(price_rls / 10)
-                print(f"✅ دلار از اسکرپینگ TGJU: {price_toman:,} تومان")
-                return price_toman
-            
-            # الگوی جایگزین
+                toman = int(float(match.group(1)) / 10)
+                print(f"✅ دلار از اسکرپینگ TGJU: {toman:,} تومان")
+                return toman
             match = re.search(r'<span[^>]*id="usd"[^>]*>([\d,]+)</span>', resp.text)
             if match:
-                price_rls = int(match.group(1).replace(',', ''))
-                price_toman = int(price_rls / 10)
-                print(f"✅ دلار از اسکرپینگ TGJU: {price_toman:,} تومان")
-                return price_toman
-            
-            # الگوی عمومی (اگر ساختار خیلی تغییر کرد)
-            match = re.search(r'([\d,]+)\s*ریال', resp.text)
-            if match:
-                price_rls = int(match.group(1).replace(',', ''))
-                price_toman = int(price_rls / 10)
-                print(f"✅ دلار از اسکرپینگ TGJU: {price_toman:,} تومان")
-                return price_toman
-        else:
-            print(f"⚠️ اسکرپینگ TGJU: کد {resp.status_code}")
+                toman = int(match.group(1).replace(',', '')) // 10
+                print(f"✅ دلار از اسکرپینگ TGJU: {toman:,} تومان")
+                return toman
     except Exception as e:
-        print(f"❌ اسکرپینگ TGJU: خطا - {e}")
+        print(f"❌ اسکرپینگ TGJU: {e}")
     
     print("❌ قیمت دلار از TGJU در دسترس نیست.")
     return None
 
 def fetch_aed_price():
-    """
-    دریافت قیمت درهم از TGJU (قیمت دلار ÷ ۳.۶۷)
-    """
     usd_toman = fetch_usd_price()
     if usd_toman:
-        aed_toman = int(usd_toman / 3.67)
-        print(f"✅ درهم محاسبه شد: {aed_toman:,} تومان")
-        return aed_toman
-    print("❌ نرخ دلار برای محاسبه درهم در دسترس نیست.")
+        aed = int(usd_toman / 3.67)
+        print(f"✅ درهم محاسبه شد: {aed:,} تومان")
+        return aed
     return None
 
 def fetch_yahoo(symbol):
@@ -228,22 +197,30 @@ def fetch_price_from_source(symbol_key):
         return round(price / 100, 4) if price else None
     return None
 
+# =============== تابع تشخیص بازار باز/بسته (اصلاح‌شده) ===============
+
 def is_market_open(symbol_key):
     now = datetime.now()
-    today = now.weekday()
+    today = now.weekday()  # 0=دوشنبه, 5=شنبه, 6=یکشنبه
+    
+    # ارزهای دیجیتال و فیات (همیشه باز)
     if symbol_key in ['btc', 'eth', 'bnb', 'gram', 'xrp', 'sol', 'doge', 'bch', 'ltc', 'trx', 'dot', 'usd', 'aed']:
         return True
-    if today == 6:
+    
+    # فلزات، انرژی و کشاورزی: شنبه و یکشنبه تعطیل
+    if today in [5, 6]:  # 5=شنبه, 6=یکشنبه
         return False
+    
+    # قوانین خاص برای شکر (ساعت ۱۲ تا ۲۱:۳۰ به وقت ایران)
     if symbol_key == 'sugar':
         iran_hour = (now.hour + 3) % 24
         iran_minute = now.minute + 30
         if iran_minute >= 60:
             iran_hour = (iran_hour + 1) % 24
             iran_minute -= 60
-        if iran_hour >= 12 and (iran_hour < 21 or (iran_hour == 21 and iran_minute <= 30)):
-            return True
-        return False
+        return 12 <= iran_hour < 21 or (iran_hour == 21 and iran_minute <= 30)
+    
+    # سایر روزها (دوشنبه تا جمعه) باز هستند
     return True
 
 DB_PATH = "market_data.db"
