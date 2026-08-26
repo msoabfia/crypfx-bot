@@ -93,7 +93,6 @@ def get_all_symbols_list():
 
 def fetch_usd_price():
     """دریافت قیمت دلار از TGJU (به تومان)"""
-    # روش اول: API عمومی
     try:
         resp = requests.get('https://api.tgju.org/v1/market/price?symbol=price_usd', timeout=10)
         if resp.status_code == 200:
@@ -106,7 +105,6 @@ def fetch_usd_price():
     except Exception as e:
         print(f"❌ TGJU API: {e}")
     
-    # روش دوم: اسکرپینگ
     try:
         resp = cffi_requests.get('https://www.tgju.org/', impersonate="chrome120", timeout=10)
         if resp.status_code == 200:
@@ -157,7 +155,13 @@ def fetch_yahoo(symbol):
         print(f"❌ Error fetching {symbol}: {e}")
         return None
 
+# =============== تابع دریافت قیمت با بررسی بازار ===============
+
 def fetch_price_from_source(symbol_key):
+    # اگر بازار بسته است، هیچ قیمتی دریافت نکن
+    if not is_market_open(symbol_key):
+        return None
+    
     if symbol_key == 'usd':
         return fetch_usd_price()
     elif symbol_key == 'aed':
