@@ -6,12 +6,12 @@ import sqlite3
 import requests
 import re
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from curl_cffi import requests as cffi_requests
 from flask import Flask
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
-from telegram.error import TimedOut, NetworkError
+from telegram.error import TimedOut, NetworkError, Forbidden, ChatNotFound
 import logging
 import threading
 
@@ -74,6 +74,11 @@ price_cache = {
     'lock': threading.Lock()
 }
 
+# =============== دیکشنری‌های سراسری با قفل ===============
+sending_active = {}
+last_sent_summary = {}
+sending_lock = threading.Lock()
+
 def get_all_symbols_list():
     all_keys = []
     for category in CATEGORIES.values():
@@ -109,7 +114,6 @@ def fetch_yahoo(symbol):
 # =============== تابع دریافت قیمت با بررسی بازار ===============
 
 def fetch_price_from_source(symbol_key):
-    # اگر بازار بسته است، هیچ قیمتی دریافت نکن
     if not is_market_open(symbol_key):
         return None
     
@@ -152,17 +156,14 @@ def fetch_price_from_source(symbol_key):
 
 def is_market_open(symbol_key):
     now = datetime.now()
-    today = now.weekday()  # 0=دوشنبه, 5=شنبه, 6=یکشنبه
+    today = now.weekday()
     
-    # ارزهای دیجیتال (همیشه باز)
     if symbol_key in ['btc', 'eth', 'bnb', 'gram', 'xrp', 'sol', 'doge', 'bch', 'ltc', 'trx', 'dot']:
         return True
     
-    # فلزات، انرژی و کشاورزی: شنبه و یکشنبه تعطیل
-    if today in [5, 6]:  # 5=شنبه, 6=یکشنبه
+    if today in [5, 6]:
         return False
     
-    # قوانین خاص برای شکر (ساعت ۱۲ تا ۲۱:۳۰ به وقت ایران)
     if symbol_key == 'sugar':
         iran_hour = (now.hour + 3) % 24
         iran_minute = now.minute + 30
@@ -171,7 +172,6 @@ def is_market_open(symbol_key):
             iran_minute -= 60
         return 12 <= iran_hour < 21 or (iran_hour == 21 and iran_minute <= 30)
     
-    # سایر روزها (دوشنبه تا جمعه) باز هستند
     return True
 
 DB_PATH = "market_data.db"
@@ -181,8 +181,8 @@ def init_db():
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS prices
                  (symbol TEXT, timestamp TEXT, price REAL, PRIMARY KEY (symbol, timestamp))''')
-    c.execute('''CREATE TABLE IF NOT EXISTS history
-                 (symbol TEXT, timestamp TEXT, price REAL)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS closing_prices
+                 (symbol TEXT, timestamp TEXT, price REAL, PRIMARY KEY (symbol, timestamp))''')
     c.execute('''CREATE TABLE IF NOT EXISTS user_selections
                  (user_id INTEGER, symbol TEXT, PRIMARY KEY (user_id, symbol))''')
     conn.commit()
@@ -196,6 +196,24 @@ def save_price(symbol, price):
     conn.commit()
     conn.close()
 
+def save_closing_price(symbol, price):
+    """ذخیره قیمت بسته شدن بازار (در زمان بسته شدن)"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('INSERT OR REPLACE INTO closing_prices (symbol, timestamp, price) VALUES (?, ?, ?)',
+              (symbol, datetime.now().isoformat(), price))
+    conn.commit()
+    conn.close()
+
+def get_closing_price(symbol):
+    """دریافت آخرین قیمت بسته شدن از دیتابیس"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT price FROM closing_prices WHERE symbol=? ORDER BY timestamp DESC LIMIT 1', (symbol,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
 def get_last_price(symbol):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -203,6 +221,38 @@ def get_last_price(symbol):
     row = c.fetchone()
     conn.close()
     return row[0] if row else None
+
+def get_price_24h_ago(symbol):
+    """دریافت قیمت ۲۴ ساعت قبل از دیتابیس"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    target_time = (datetime.now() - timedelta(hours=24)).isoformat()
+    c.execute('SELECT price FROM prices WHERE symbol=? AND timestamp <= ? ORDER BY timestamp DESC LIMIT 1', (symbol, target_time))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def clean_old_prices(days=30):
+    """حذف قیمت‌های قدیمی‌تر از ۳۰ روز"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    c.execute('DELETE FROM prices WHERE timestamp < ?', (cutoff,))
+    c.execute('DELETE FROM closing_prices WHERE timestamp < ?', (cutoff,))
+    conn.commit()
+    conn.close()
+    print(f"🗑️ قیمت‌های قدیمی‌تر از {days} روز حذف شدند.")
+
+def clean_inactive_users():
+    """حذف کاربران غیرفعال از دیکشنری sending_active"""
+    with sending_lock:
+        inactive_users = [uid for uid, active in sending_active.items() if not active]
+        for uid in inactive_users:
+            del sending_active[uid]
+            if uid in last_sent_summary:
+                del last_sent_summary[uid]
+        if inactive_users:
+            print(f"🧹 {len(inactive_users)} کاربر غیرفعال پاک شدند.")
 
 def refresh_price_cache():
     with price_cache['lock']:
@@ -213,23 +263,34 @@ def refresh_price_cache():
         print(f"🔄 به‌روزرسانی کش قیمت‌ها در {datetime.now().isoformat()}")
         new_data = {}
         for symbol in get_all_symbols_list():
-            old_price = get_last_price(symbol)
             new_price = fetch_price_from_source(symbol)
+            old_24h = get_price_24h_ago(symbol)
+            
             if new_price is not None:
-                new_data[symbol] = {'new': new_price, 'old': old_price}
+                new_data[symbol] = {'new': new_price, 'old_24h': old_24h}
                 save_price(symbol, new_price)
+                # اگر بازار باز است و قیمت جدید دریافت شد، آن را به‌عنوان قیمت بسته شدن نیز ذخیره کن
+                save_closing_price(symbol, new_price)
             else:
-                if old_price is not None:
-                    new_data[symbol] = {'new': old_price, 'old': old_price}
+                # اگر بازار بسته است، از آخرین قیمت بسته شدن استفاده کن
+                closing_price = get_closing_price(symbol)
+                if closing_price is not None:
+                    new_data[symbol] = {'new': closing_price, 'old_24h': old_24h}
+                else:
+                    last = get_last_price(symbol)
+                    if last is not None:
+                        new_data[symbol] = {'new': last, 'old_24h': old_24h}
         price_cache['data'] = new_data
         price_cache['last_update'] = now
+        
+        clean_old_prices(30)  # ← تغییر به ۳۰ روز
 
-def get_cached_price_with_old(symbol):
+def get_cached_price_with_24h(symbol):
     refresh_price_cache()
     with price_cache['lock']:
         data = price_cache['data'].get(symbol)
         if data:
-            return data.get('new'), data.get('old')
+            return data.get('new'), data.get('old_24h')
         return None, None
 
 def get_user_selections(user_id):
@@ -271,9 +332,6 @@ def select_all_symbols(user_id):
     conn.commit()
     conn.close()
 
-sending_active = {}
-last_sent_summary = {}
-
 def get_all_symbols():
     all_symbols = []
     for category in CATEGORIES.values():
@@ -314,7 +372,7 @@ def generate_price_message(selections):
             continue
         lines.append(f"{cat['emoji']} {cat['name']}:")
         for key, name, emoji in cat_selected:
-            new_price, old_price = get_cached_price_with_old(key)
+            new_price, old_24h = get_cached_price_with_24h(key)
             if new_price is None:
                 if not is_market_open(key):
                     last = get_last_price(key)
@@ -322,14 +380,14 @@ def generate_price_message(selections):
                         formatted = format_price(last, key)
                         lines.append(f"{emoji} {name} : {formatted} 🔒 بازار بسته")
                     else:
-                        lines.append(f"{emoji} {name} : ⛔ در دسترس نیست")
+                        lines.append(f"{emoji} {name} : 🔒 بازار بسته")
                 else:
                     lines.append(f"{emoji} {name} : ⛔ در دسترس نیست")
                 continue
             formatted = format_price(new_price, key)
             change = None
-            if old_price is not None and old_price > 0:
-                change = ((new_price - old_price) / old_price) * 100
+            if old_24h is not None and old_24h > 0:
+                change = ((new_price - old_24h) / old_24h) * 100
             change_text = format_change(change)
             if change_text:
                 lines.append(f"{emoji} {name} : {formatted} {change_text}")
@@ -338,7 +396,7 @@ def generate_price_message(selections):
         lines.append("")
     return "\n".join(lines) if lines else "هیچ نمادی انتخاب نشده است."
 
-async def show_main_menu(chat_id, user_id):
+async def show_main_menu(chat_id, user_id, query=None):
     text = "📊 **به ربات قیمت‌های لحظه‌ای خوش آمدید!**\n\n"
     text += "لطفاً یک دسته را انتخاب کنید:\n"
     keyboard = []
@@ -347,9 +405,13 @@ async def show_main_menu(chat_id, user_id):
     keyboard.append([InlineKeyboardButton("📊 نمایش همه", callback_data="show_all")])
     keyboard.append([InlineKeyboardButton("📋 وضعیت دیتابیس", callback_data="status")])
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await send_message(chat_id, text, parse_mode='Markdown', reply_markup=reply_markup)
 
-async def show_category_symbols(chat_id, user_id, category_key):
+    if query:
+        await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+    else:
+        await send_message(chat_id, text, parse_mode='Markdown', reply_markup=reply_markup)
+
+async def show_category_symbols(chat_id, user_id, category_key, query=None):
     cat = CATEGORIES[category_key]
     selections = get_user_selections(user_id)
     text = f"📊 **{cat['emoji']} {cat['name']}**\n\n"
@@ -375,9 +437,13 @@ async def show_category_symbols(chat_id, user_id, category_key):
     keyboard.append([InlineKeyboardButton("🛑 توقف ارسال", callback_data="stop_sending")])
     keyboard.append([InlineKeyboardButton("🗑️ پاک کردن همه انتخاب‌ها", callback_data="clear_all")])
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await send_message(chat_id, text, parse_mode='Markdown', reply_markup=reply_markup)
 
-async def show_all_symbols(chat_id, user_id):
+    if query:
+        await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+    else:
+        await send_message(chat_id, text, parse_mode='Markdown', reply_markup=reply_markup)
+
+async def show_all_symbols(chat_id, user_id, query=None):
     selections = get_user_selections(user_id)
     text = "📊 **همه نمادها**\n\n"
     text += "✅ روی هر نماد کلیک کنید تا انتخاب/لغو شود.\n"
@@ -402,7 +468,11 @@ async def show_all_symbols(chat_id, user_id):
     keyboard.append([InlineKeyboardButton("🛑 توقف ارسال", callback_data="stop_sending")])
     keyboard.append([InlineKeyboardButton("🗑️ پاک کردن همه انتخاب‌ها", callback_data="clear_all")])
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await send_message(chat_id, text, parse_mode='Markdown', reply_markup=reply_markup)
+
+    if query:
+        await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+    else:
+        await send_message(chat_id, text, parse_mode='Markdown', reply_markup=reply_markup)
 
 async def start(update, context):
     user_id = update.effective_user.id
@@ -417,49 +487,64 @@ async def button_handler(update, context):
     data = query.data
 
     if data == "back_categories":
-        await show_main_menu(chat_id, user_id)
+        await show_main_menu(chat_id, user_id, query)
         return
+
     if data == "status":
-        await status_db(chat_id)
+        report = "📊 **وضعیت دیتابیس**\n"
+        for key, name, emoji in get_all_symbols():
+            price = get_last_price(key)
+            report += f"🔹 {name}: {price if price else 'ندارد'}\n"
+        await query.edit_message_text(report, parse_mode='Markdown')
         return
+
     if data == "clear_all":
         clear_user_selections(user_id)
         await query.edit_message_text("🗑️ همه انتخاب‌ها پاک شد.")
         await show_main_menu(chat_id, user_id)
         return
+
     if data == "select_all":
         select_all_symbols(user_id)
         await query.edit_message_text("📊 همه نمادها انتخاب شدند.")
-        await show_all_symbols(chat_id, user_id)
+        await show_all_symbols(chat_id, user_id, query)
         return
+
     if data == "show_all":
-        await show_all_symbols(chat_id, user_id)
+        await show_all_symbols(chat_id, user_id, query)
         return
+
     if data.startswith("cat_"):
         category_key = data.replace("cat_", "")
-        await show_category_symbols(chat_id, user_id, category_key)
+        await show_category_symbols(chat_id, user_id, category_key, query)
         return
+
     if data.startswith("select_all_cat_"):
         category_key = data.replace("select_all_cat_", "")
         cat = CATEGORIES[category_key]
         for key, _, _ in cat['symbols']:
             save_user_selection(user_id, key)
         await query.edit_message_text(f"📊 همه نمادهای {cat['name']} انتخاب شدند.")
-        await show_category_symbols(chat_id, user_id, category_key)
+        await show_category_symbols(chat_id, user_id, category_key, query)
         return
+
     if data == "start_sending":
         selections = get_user_selections(user_id)
         if not selections:
             await query.edit_message_text("⚠️ حداقل یک نماد انتخاب کنید.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_categories")]]))
             return
-        sending_active[user_id] = True
-        last_sent_summary[user_id] = ""
+        with sending_lock:
+            sending_active[user_id] = True
+            last_sent_summary[user_id] = ""
         await query.edit_message_text("🚀 **ارسال خودکار شروع شد!**\nهر ۱ دقیقه قیمت‌های انتخاب‌شده ارسال می‌شود.", parse_mode='Markdown')
         return
+
     if data == "stop_sending":
-        sending_active[user_id] = False
+        with sending_lock:
+            sending_active[user_id] = False
         await query.edit_message_text("🛑 **ارسال خودکار متوقف شد.**", parse_mode='Markdown')
         return
+
     if data.startswith("toggle_"):
         symbol = data.replace("toggle_", "")
         selections = get_user_selections(user_id)
@@ -467,12 +552,12 @@ async def button_handler(update, context):
             remove_user_selection(user_id, symbol)
         else:
             save_user_selection(user_id, symbol)
-        await show_all_symbols(chat_id, user_id)
+        await show_all_symbols(chat_id, user_id, query)
         return
 
 async def status_single(update, symbol_key, name, emoji):
     chat_id = update.effective_chat.id
-    new_price, old_price = get_cached_price_with_old(symbol_key)
+    new_price, old_24h = get_cached_price_with_24h(symbol_key)
 
     if new_price is None:
         last = get_last_price(symbol_key)
@@ -483,13 +568,16 @@ async def status_single(update, symbol_key, name, emoji):
             else:
                 await send_message(chat_id, f"{emoji} **{name}**\n💰 {formatted}", parse_mode='Markdown')
         else:
-            await send_message(chat_id, f"{emoji} {name}: ⛔ در دسترس نیست.")
+            if not is_market_open(symbol_key):
+                await send_message(chat_id, f"{emoji} **{name}**\n🔒 بازار بسته", parse_mode='Markdown')
+            else:
+                await send_message(chat_id, f"{emoji} {name}: ⛔ در دسترس نیست.")
         return
 
     formatted = format_price(new_price, symbol_key)
     change = None
-    if old_price is not None and old_price > 0:
-        change = ((new_price - old_price) / old_price) * 100
+    if old_24h is not None and old_24h > 0:
+        change = ((new_price - old_24h) / old_24h) * 100
     change_text = format_change(change)
     if change_text:
         await send_message(chat_id, f"{emoji} **{name}**\n💰 {formatted}\n{change_text}", parse_mode='Markdown')
@@ -543,24 +631,47 @@ async def help_command(update, context):
 
 async def auto_send_loop():
     bot = Bot(token=TELEGRAM_TOKEN)
+    last_cleanup = time.time()
     while True:
         try:
             refresh_price_cache()
-            for user_id in list(sending_active.keys()):
-                if not sending_active.get(user_id, False):
+            
+            with sending_lock:
+                active_users = list(sending_active.items())
+            
+            for user_id, is_active in active_users:
+                if not is_active:
                     continue
                 selections = get_user_selections(user_id)
                 if not selections:
-                    sending_active[user_id] = False
+                    with sending_lock:
+                        sending_active[user_id] = False
                     continue
                 message = generate_price_message(selections)
-                if message and message != last_sent_summary.get(user_id, ""):
-                    await bot.send_message(
-                        user_id,
-                        f"🔔 **به‌روزرسانی قیمت‌ها**\n━━━━━━━━━━━━━━━━━━━\n{message}",
-                        parse_mode='Markdown'
-                    )
-                    last_sent_summary[user_id] = message
+                if message:
+                    with sending_lock:
+                        last_msg = last_sent_summary.get(user_id, "")
+                    if message != last_msg:
+                        try:
+                            await bot.send_message(
+                                user_id,
+                                f"🔔 **به‌روزرسانی قیمت‌ها**\n━━━━━━━━━━━━━━━━━━━\n{message}",
+                                parse_mode='Markdown'
+                            )
+                            with sending_lock:
+                                last_sent_summary[user_id] = message
+                        except (Forbidden, ChatNotFound) as e:
+                            print(f"🚫 کاربر {user_id} ربات را بلاک/حذف کرده است. ارسال متوقف شد.")
+                            with sending_lock:
+                                sending_active[user_id] = False
+                            clear_user_selections(user_id)
+                        except Exception as e:
+                            print(f"⚠️ خطا در ارسال به {user_id}: {e}")
+            
+            if time.time() - last_cleanup > 600:
+                clean_inactive_users()
+                last_cleanup = time.time()
+            
             await asyncio.sleep(INTERVAL)
         except Exception as e:
             print(f"⚠️ خطا در حلقه خودکار: {e}")
@@ -603,7 +714,7 @@ def home():
 
 @flask_app.route('/health')
 def health():
-    return "OK"
+    return "OK", 200
 
 def run_flask():
     port = int(os.environ.get('PORT', 10000))
