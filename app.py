@@ -11,7 +11,7 @@ from curl_cffi import requests as cffi_requests
 from flask import Flask
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
-from telegram.error import TimedOut, NetworkError, Forbidden, ChatNotFound
+from telegram.error import TimedOut, NetworkError, Forbidden
 import logging
 import threading
 
@@ -269,10 +269,8 @@ def refresh_price_cache():
             if new_price is not None:
                 new_data[symbol] = {'new': new_price, 'old_24h': old_24h}
                 save_price(symbol, new_price)
-                # اگر بازار باز است و قیمت جدید دریافت شد، آن را به‌عنوان قیمت بسته شدن نیز ذخیره کن
                 save_closing_price(symbol, new_price)
             else:
-                # اگر بازار بسته است، از آخرین قیمت بسته شدن استفاده کن
                 closing_price = get_closing_price(symbol)
                 if closing_price is not None:
                     new_data[symbol] = {'new': closing_price, 'old_24h': old_24h}
@@ -283,7 +281,7 @@ def refresh_price_cache():
         price_cache['data'] = new_data
         price_cache['last_update'] = now
         
-        clean_old_prices(30)  # ← تغییر به ۳۰ روز
+        clean_old_prices(30)
 
 def get_cached_price_with_24h(symbol):
     refresh_price_cache()
@@ -660,7 +658,7 @@ async def auto_send_loop():
                             )
                             with sending_lock:
                                 last_sent_summary[user_id] = message
-                        except (Forbidden, ChatNotFound) as e:
+                        except Forbidden as e:
                             print(f"🚫 کاربر {user_id} ربات را بلاک/حذف کرده است. ارسال متوقف شد.")
                             with sending_lock:
                                 sending_active[user_id] = False
