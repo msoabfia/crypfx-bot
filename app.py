@@ -25,14 +25,6 @@ TIMEOUT = 30
 logging.basicConfig(level=logging.INFO)
 
 CATEGORIES = {
-    'fiat': {
-        'name': 'واحد پولی(تومان)',
-        'emoji': '💳',
-        'symbols': [
-            ('usd', 'USD', '💵'),
-            ('aed', 'AED', '🇦🇪'),
-        ]
-    },
     'crypto': {
         'name': 'ارزهای دیجیتال',
         'emoji': '💰',
@@ -89,48 +81,7 @@ def get_all_symbols_list():
             all_keys.append(key)
     return all_keys
 
-# =============== توابع دریافت قیمت فقط از TGJU ===============
-
-def fetch_usd_price():
-    """دریافت قیمت دلار از TGJU (به تومان)"""
-    try:
-        resp = requests.get('https://api.tgju.org/v1/market/price?symbol=price_usd', timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            price_rls = data.get('data', {}).get('price')
-            if price_rls:
-                toman = int(float(price_rls) / 10)
-                print(f"✅ دلار از TGJU API: {toman:,} تومان")
-                return toman
-    except Exception as e:
-        print(f"❌ TGJU API: {e}")
-    
-    try:
-        resp = cffi_requests.get('https://www.tgju.org/', impersonate="chrome120", timeout=10)
-        if resp.status_code == 200:
-            match = re.search(r'"price_usd":"([\d.]+)"', resp.text)
-            if match:
-                toman = int(float(match.group(1)) / 10)
-                print(f"✅ دلار از اسکرپینگ TGJU: {toman:,} تومان")
-                return toman
-            match = re.search(r'<span[^>]*id="usd"[^>]*>([\d,]+)</span>', resp.text)
-            if match:
-                toman = int(match.group(1).replace(',', '')) // 10
-                print(f"✅ دلار از اسکرپینگ TGJU: {toman:,} تومان")
-                return toman
-    except Exception as e:
-        print(f"❌ اسکرپینگ TGJU: {e}")
-    
-    print("❌ قیمت دلار از TGJU در دسترس نیست.")
-    return None
-
-def fetch_aed_price():
-    usd_toman = fetch_usd_price()
-    if usd_toman:
-        aed = int(usd_toman / 3.67)
-        print(f"✅ درهم محاسبه شد: {aed:,} تومان")
-        return aed
-    return None
+# =============== توابع دریافت قیمت ===============
 
 def fetch_yahoo(symbol):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1h&range=1d"
@@ -162,11 +113,7 @@ def fetch_price_from_source(symbol_key):
     if not is_market_open(symbol_key):
         return None
     
-    if symbol_key == 'usd':
-        return fetch_usd_price()
-    elif symbol_key == 'aed':
-        return fetch_aed_price()
-    elif symbol_key == 'gram':
+    if symbol_key == 'gram':
         return fetch_yahoo('GRAM-USD')
     elif symbol_key == 'btc':
         return fetch_yahoo('BTC-USD')
@@ -201,14 +148,14 @@ def fetch_price_from_source(symbol_key):
         return round(price / 100, 4) if price else None
     return None
 
-# =============== تابع تشخیص بازار باز/بسته (اصلاح‌شده) ===============
+# =============== تابع تشخیص بازار باز/بسته ===============
 
 def is_market_open(symbol_key):
     now = datetime.now()
     today = now.weekday()  # 0=دوشنبه, 5=شنبه, 6=یکشنبه
     
-    # ارزهای دیجیتال و فیات (همیشه باز)
-    if symbol_key in ['btc', 'eth', 'bnb', 'gram', 'xrp', 'sol', 'doge', 'bch', 'ltc', 'trx', 'dot', 'usd', 'aed']:
+    # ارزهای دیجیتال (همیشه باز)
+    if symbol_key in ['btc', 'eth', 'bnb', 'gram', 'xrp', 'sol', 'doge', 'bch', 'ltc', 'trx', 'dot']:
         return True
     
     # فلزات، انرژی و کشاورزی: شنبه و یکشنبه تعطیل
@@ -340,8 +287,6 @@ async def send_message(chat_id, text, parse_mode='Markdown', reply_markup=None):
 def format_price(price, symbol_key):
     if price is None:
         return "⛔ در دسترس نیست"
-    if symbol_key in ['usd', 'aed']:
-        return f"{price:,.0f}"
     if symbol_key == 'gram':
         return f"{price:,.4f}"
     if price < 0.001:
@@ -371,13 +316,13 @@ def generate_price_message(selections):
         for key, name, emoji in cat_selected:
             new_price, old_price = get_cached_price_with_old(key)
             if new_price is None:
-                last = get_last_price(key)
-                if last is not None:
-                    formatted = format_price(last, key)
-                    if not is_market_open(key):
+                if not is_market_open(key):
+                    last = get_last_price(key)
+                    if last is not None:
+                        formatted = format_price(last, key)
                         lines.append(f"{emoji} {name} : {formatted} 🔒 بازار بسته")
                     else:
-                        lines.append(f"{emoji} {name} : {formatted}")
+                        lines.append(f"{emoji} {name} : ⛔ در دسترس نیست")
                 else:
                     lines.append(f"{emoji} {name} : ⛔ در دسترس نیست")
                 continue
@@ -563,8 +508,6 @@ async def doge(update, context): await status_single(update, 'doge', 'DOGE', '�
 async def bch(update, context): await status_single(update, 'bch', 'BCH', '🔶')
 async def ltc(update, context): await status_single(update, 'ltc', 'LTC', '⚡')
 async def trx(update, context): await status_single(update, 'trx', 'TRX', '🔴')
-async def usd(update, context): await status_single(update, 'usd', 'USD', '💵')
-async def aed(update, context): await status_single(update, 'aed', 'AED', '🇦🇪')
 async def oil(update, context): await status_single(update, 'oil', 'OIL', '🛢️')
 async def brent(update, context): await status_single(update, 'brent', 'BRENT', '🛢️')
 async def gas(update, context): await status_single(update, 'gas', 'GAS', '🔥')
@@ -596,8 +539,6 @@ async def help_command(update, context):
         "/start - منوی اصلی\n"
         "/all - نمایش قیمت‌های انتخاب‌شده\n"
         "/status - وضعیت دیتابیس\n"
-        "/usd - قیمت دلار\n"
-        "/aed - قیمت درهم امارات"
     )
 
 async def auto_send_loop():
@@ -644,8 +585,6 @@ def run_bot_in_main_thread():
     app.add_handler(CommandHandler("bch", bch))
     app.add_handler(CommandHandler("ltc", ltc))
     app.add_handler(CommandHandler("trx", trx))
-    app.add_handler(CommandHandler("usd", usd))
-    app.add_handler(CommandHandler("aed", aed))
     app.add_handler(CommandHandler("oil", oil))
     app.add_handler(CommandHandler("brent", brent))
     app.add_handler(CommandHandler("gas", gas))
