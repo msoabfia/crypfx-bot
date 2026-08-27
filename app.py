@@ -18,7 +18,8 @@ import threading
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN environment variable not set!")
-CHAT_ID = os.environ.get('CHAT_ID', '483833953')
+
+ADMIN_CHAT_ID = os.environ.get('ADMIN_CHAT_ID', '483833953')
 INTERVAL = 60
 TIMEOUT = 30
 
@@ -185,6 +186,8 @@ def init_db():
                  (symbol TEXT, timestamp TEXT, price REAL, PRIMARY KEY (symbol, timestamp))''')
     c.execute('''CREATE TABLE IF NOT EXISTS user_selections
                  (user_id INTEGER, symbol TEXT, PRIMARY KEY (user_id, symbol))''')
+    c.execute('''CREATE TABLE IF NOT EXISTS user_settings
+                 (user_id INTEGER PRIMARY KEY, auto_send INTEGER DEFAULT 0)''')
     conn.commit()
     conn.close()
 
@@ -197,7 +200,6 @@ def save_price(symbol, price):
     conn.close()
 
 def save_closing_price(symbol, price):
-    """ذخیره قیمت بسته شدن بازار (در زمان بسته شدن)"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('INSERT OR REPLACE INTO closing_prices (symbol, timestamp, price) VALUES (?, ?, ?)',
@@ -206,7 +208,6 @@ def save_closing_price(symbol, price):
     conn.close()
 
 def get_closing_price(symbol):
-    """دریافت آخرین قیمت بسته شدن از دیتابیس"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('SELECT price FROM closing_prices WHERE symbol=? ORDER BY timestamp DESC LIMIT 1', (symbol,))
@@ -223,7 +224,6 @@ def get_last_price(symbol):
     return row[0] if row else None
 
 def get_price_24h_ago(symbol):
-    """دریافت قیمت ۲۴ ساعت قبل از دیتابیس"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     target_time = (datetime.now() - timedelta(hours=24)).isoformat()
@@ -233,7 +233,6 @@ def get_price_24h_ago(symbol):
     return row[0] if row else None
 
 def clean_old_prices(days=30):
-    """حذف قیمت‌های قدیمی‌تر از ۳۰ روز"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     cutoff = (datetime.now() - timedelta(days=days)).isoformat()
@@ -243,14 +242,29 @@ def clean_old_prices(days=30):
     conn.close()
     print(f"🗑️ قیمت‌های قدیمی‌تر از {days} روز حذف شدند.")
 
+def save_auto_send_status(user_id, status):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('INSERT OR REPLACE INTO user_settings (user_id, auto_send) VALUES (?, ?)', (user_id, 1 if status else 0))
+    conn.commit()
+    conn.close()
+
+def get_all_auto_send_users():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT user_id FROM user_settings WHERE auto_send = 1')
+    rows = c.fetchall()
+    conn.close()
+    return [row[0] for row in rows]
+
 def clean_inactive_users():
-    """حذف کاربران غیرفعال از دیکشنری sending_active"""
     with sending_lock:
         inactive_users = [uid for uid, active in sending_active.items() if not active]
         for uid in inactive_users:
             del sending_active[uid]
             if uid in last_sent_summary:
                 del last_sent_summary[uid]
+            save_auto_send_status(uid, False)
         if inactive_users:
             print(f"🧹 {len(inactive_users)} کاربر غیرفعال پاک شدند.")
 
@@ -402,6 +416,7 @@ async def show_main_menu(chat_id, user_id, query=None):
         keyboard.append([InlineKeyboardButton(f"{cat['emoji']} {cat['name']}", callback_data=f"cat_{cat_key}")])
     keyboard.append([InlineKeyboardButton("📊 نمایش همه", callback_data="show_all")])
     keyboard.append([InlineKeyboardButton("📋 وضعیت دیتابیس", callback_data="status")])
+    keyboard.append([InlineKeyboardButton("⚙️ ویرایش نمادها", callback_data="show_all")])
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     if query:
@@ -534,12 +549,14 @@ async def button_handler(update, context):
         with sending_lock:
             sending_active[user_id] = True
             last_sent_summary[user_id] = ""
+        save_auto_send_status(user_id, True)
         await query.edit_message_text("🚀 **ارسال خودکار شروع شد!**\nهر ۱ دقیقه قیمت‌های انتخاب‌شده ارسال می‌شود.", parse_mode='Markdown')
         return
 
     if data == "stop_sending":
         with sending_lock:
             sending_active[user_id] = False
+        save_auto_send_status(user_id, False)
         await query.edit_message_text("🛑 **ارسال خودکار متوقف شد.**", parse_mode='Markdown')
         return
 
@@ -644,17 +661,22 @@ async def auto_send_loop():
                 if not selections:
                     with sending_lock:
                         sending_active[user_id] = False
+                    save_auto_send_status(user_id, False)
                     continue
                 message = generate_price_message(selections)
                 if message:
                     with sending_lock:
                         last_msg = last_sent_summary.get(user_id, "")
                     if message != last_msg:
+                        keyboard = [[InlineKeyboardButton("⚙️ ویرایش نمادها", callback_data="show_all")]]
+                        reply_markup = InlineKeyboardMarkup(keyboard)
+                        
                         try:
                             await bot.send_message(
                                 user_id,
                                 f"🔔 **به‌روزرسانی قیمت‌ها**\n━━━━━━━━━━━━━━━━━━━\n{message}",
-                                parse_mode='Markdown'
+                                parse_mode='Markdown',
+                                reply_markup=reply_markup
                             )
                             with sending_lock:
                                 last_sent_summary[user_id] = message
@@ -662,6 +684,7 @@ async def auto_send_loop():
                             print(f"🚫 کاربر {user_id} ربات را بلاک/حذف کرده است. ارسال متوقف شد.")
                             with sending_lock:
                                 sending_active[user_id] = False
+                            save_auto_send_status(user_id, False)
                             clear_user_selections(user_id)
                         except Exception as e:
                             print(f"⚠️ خطا در ارسال به {user_id}: {e}")
@@ -679,6 +702,32 @@ def start_auto_send():
     asyncio.run(auto_send_loop())
 
 def run_bot_in_main_thread():
+    # =============== بازیابی وضعیت ارسال خودکار از دیتابیس ===============
+    try:
+        active_users = get_all_auto_send_users()
+        for user_id in active_users:
+            sending_active[user_id] = True
+            last_sent_summary[user_id] = ""
+        if active_users:
+            print(f"🔄 {len(active_users)} کاربر با ارسال خودکار فعال بازیابی شدند.")
+    except Exception as e:
+        print(f"⚠️ خطا در بازیابی وضعیت کاربران: {e}")
+
+    # =============== ارسال پیام آپدیت به مدیر ===============
+    try:
+        bot = Bot(token=TELEGRAM_TOKEN)
+        bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text="✅ **آپدیت ربات با موفقیت انجام شد!**\n"
+                 f"🔄 {len(get_all_auto_send_users())} کاربر با ارسال خودکار فعال بازیابی شدند.\n"
+                 "ربات دوباره راه‌اندازی شد و آماده‌ی کار است.",
+            parse_mode='Markdown'
+        )
+        print(f"📨 پیام آپدیت به مدیر ({ADMIN_CHAT_ID}) ارسال شد.")
+    except Exception as e:
+        print(f"⚠️ خطا در ارسال پیام آپدیت: {e}")
+
+    # =============== اجرای ربات ===============
     app = Application.builder().token(TELEGRAM_TOKEN).connect_timeout(TIMEOUT).read_timeout(TIMEOUT).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
