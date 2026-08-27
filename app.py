@@ -20,7 +20,7 @@ if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN environment variable not set!")
 
 # =============== شناسه مدیر (همان شما) ===============
-ADMIN_CHAT_ID = '483833953'  # ← هاردکد شد (شناسه شما)
+ADMIN_CHAT_ID = '483833953'
 
 INTERVAL = 60
 TIMEOUT = 30
@@ -718,12 +718,15 @@ def run_bot_in_main_thread():
     # =============== ارسال پیام آپدیت به مدیر ===============
     try:
         bot = Bot(token=TELEGRAM_TOKEN)
-        bot.send_message(
-            chat_id=ADMIN_CHAT_ID,
-            text="✅ **آپدیت ربات با موفقیت انجام شد!**\n"
-                 f"🔄 {len(get_all_auto_send_users())} کاربر با ارسال خودکار فعال بازیابی شدند.\n"
-                 "ربات دوباره راه‌اندازی شد و آماده‌ی کار است.",
-            parse_mode='Markdown'
+        # استفاده از asyncio.run برای اجرای تابع async
+        asyncio.run(
+            bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text="✅ **آپدیت ربات با موفقیت انجام شد!**\n"
+                     f"🔄 {len(get_all_auto_send_users())} کاربر با ارسال خودکار فعال بازیابی شدند.\n"
+                     "ربات دوباره راه‌اندازی شد و آماده‌ی کار است.",
+                parse_mode='Markdown'
+            )
         )
         print(f"📨 پیام آپدیت به مدیر ({ADMIN_CHAT_ID}) ارسال شد.")
     except Exception as e:
