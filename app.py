@@ -551,7 +551,6 @@ async def status_single(update: Update, symbol_key: str, name: str, emoji: str):
     await send_message(chat_id, f"{emoji} **{name}**\n💰 {formatted} {format_change(change)}")
 
 
-# تعریف دستورات (با استفاده از دیکشنری)
 COMMANDS = {
     "gold": ("gold", "GOLD", "🏆"),
     "silver": ("silver", "SILVER", "🥈"),
@@ -685,7 +684,7 @@ def run_bot_in_main_thread():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("all", all_status))
-    app.add_handler(CommandHandler("status", status_single_helper))
+    app.add_handler(CommandHandler("status", all_status))
 
     for cmd, (key, name, emoji) in COMMANDS.items():
         async def handler(update, context, key=key, name=name, emoji=emoji):
@@ -695,11 +694,6 @@ def run_bot_in_main_thread():
     app.add_handler(CallbackQueryHandler(button_handler))
     logger.info("🤖 ربات در حال اجرا...")
     app.run_polling()
-
-
-async def status_single_helper(update: Update, context):
-    # برای دستور /status که وضعیت کامل را نشان می‌دهد
-    await all_status(update, context)
 
 
 # ==================== وب سرویس Flask ====================
