@@ -19,7 +19,9 @@ TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN environment variable not set!")
 
-ADMIN_CHAT_ID = os.environ.get('ADMIN_CHAT_ID', '483833953')
+# =============== شناسه مدیر (همان شما) ===============
+ADMIN_CHAT_ID = '483833953'  # ← هاردکد شد (شناسه شما)
+
 INTERVAL = 60
 TIMEOUT = 30
 
