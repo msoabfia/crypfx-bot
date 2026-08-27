@@ -16,7 +16,7 @@ from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 from telegram.error import TimedOut, NetworkError, Forbidden
 
-# ==================== تنظیمات ===================
+# ==================== تنظیمات ====================
 CONFIG = {
     "TELEGRAM_TOKEN": os.environ.get("TELEGRAM_TOKEN"),
     "ADMIN_CHAT_ID": os.environ.get("ADMIN_CHAT_ID", "483833953"),
@@ -388,13 +388,6 @@ def get_all_symbols():
     return [s for cat in CATEGORIES.values() for s in cat["symbols"]]
 
 
-def build_inline_keyboard(buttons: List[Dict]) -> InlineKeyboardMarkup:
-    keyboard = []
-    for row in buttons:
-        keyboard.append([InlineKeyboardButton(row["text"], callback_data=row["callback"])])
-    return InlineKeyboardMarkup(keyboard)
-
-
 # ==================== توابع تلگرام ====================
 async def send_message(chat_id: int, text: str, parse_mode: str = "Markdown", reply_markup=None):
     bot = Bot(token=CONFIG["TELEGRAM_TOKEN"])
@@ -551,6 +544,7 @@ async def status_single(update: Update, symbol_key: str, name: str, emoji: str):
     await send_message(chat_id, f"{emoji} **{name}**\n💰 {formatted} {format_change(change)}")
 
 
+# ==================== دستورات ====================
 COMMANDS = {
     "gold": ("gold", "GOLD", "🏆"),
     "silver": ("silver", "SILVER", "🥈"),
@@ -581,7 +575,26 @@ async def all_status(update: Update, context):
 
 async def help_command(update: Update, context):
     await send_message(update.effective_chat.id,
-        "📋 **دستورات:**\n/start - منوی اصلی\n/all - نمایش قیمت‌های انتخاب‌شده\n/status - وضعیت دیتابیس")
+        "📋 **دستورات:**\n/start - منوی اصلی\n/all - نمایش قیمت‌های انتخاب‌شده\n/status - وضعیت دیتابیس\n/migrate - (فقط مدیر) بازیابی خودکار همه کاربران")
+
+
+# ==================== دستور مهاجرت (فقط مدیر) ====================
+async def migrate_users(update: Update, context):
+    # فقط مدیر مجاز است
+    if str(update.effective_user.id) != CONFIG["ADMIN_CHAT_ID"]:
+        await update.message.reply_text("⛔ شما اجازه این کار را ندارید.")
+        return
+    # دریافت همه کاربرانی که حداقل یک نماد انتخاب کرده‌اند
+    rows = db.fetch_all("SELECT DISTINCT user_id FROM user_selections")
+    count = 0
+    for row in rows:
+        user_id = row[0]
+        # بررسی اینکه آیا از قبل در user_settings هست یا نه
+        existing = db.fetch_one("SELECT auto_send FROM user_settings WHERE user_id=?", (user_id,))
+        if not existing:
+            db.execute_query("INSERT INTO user_settings (user_id, auto_send) VALUES (?, 1)", (user_id,))
+            count += 1
+    await update.message.reply_text(f"✅ {count} کاربر به لیست ارسال خودکار اضافه شدند.")
 
 
 # ==================== حلقه خودکار ====================
@@ -671,7 +684,8 @@ def run_bot_in_main_thread():
                 chat_id=CONFIG["ADMIN_CHAT_ID"],
                 text="✅ **آپدیت ربات با موفقیت انجام شد!**\n"
                      f"🔄 {len(get_all_auto_send_users())} کاربر با ارسال خودکار فعال بازیابی شدند.\n"
-                     "ربات دوباره راه‌اندازی شد و آماده‌ی کار است.",
+                     "ربات دوباره راه‌اندازی شد و آماده‌ی کار است.\n"
+                     "اگر کاربرانی ارسال نمی‌شوند، از دستور /migrate استفاده کنید.",
                 parse_mode="Markdown",
             )
         )
@@ -685,6 +699,7 @@ def run_bot_in_main_thread():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("all", all_status))
     app.add_handler(CommandHandler("status", all_status))
+    app.add_handler(CommandHandler("migrate", migrate_users))  # ← دستور جدید
 
     for cmd, (key, name, emoji) in COMMANDS.items():
         async def handler(update, context, key=key, name=name, emoji=emoji):
