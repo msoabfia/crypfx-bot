@@ -80,9 +80,6 @@ sending_active = {}
 last_sent_summary = {}
 sending_lock = threading.Lock()
 
-# =============== مسیر دیتابیس (در Persistent Disk) ===============
-DB_PATH = "/data/market_data.db"
-
 def get_all_symbols_list():
     all_keys = []
     for category in CATEGORIES.values():
@@ -178,12 +175,9 @@ def is_market_open(symbol_key):
     
     return True
 
-# =============== توابع دیتابیس ===============
+DB_PATH = "market_data.db"
 
 def init_db():
-    # اطمینان از وجود پوشه /data
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS prices
@@ -259,14 +253,6 @@ def get_all_auto_send_users():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('SELECT user_id FROM user_settings WHERE auto_send = 1')
-    rows = c.fetchall()
-    conn.close()
-    return [row[0] for row in rows]
-
-def get_all_users():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT DISTINCT user_id FROM user_selections')
     rows = c.fetchall()
     conn.close()
     return [row[0] for row in rows]
