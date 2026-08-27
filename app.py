@@ -16,7 +16,7 @@ from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 from telegram.error import TimedOut, NetworkError, Forbidden
 
-# ==================== تنظیمات ====================
+# ==================== تنظیمات ===================
 CONFIG = {
     "TELEGRAM_TOKEN": os.environ.get("TELEGRAM_TOKEN"),
     "ADMIN_CHAT_ID": os.environ.get("ADMIN_CHAT_ID", "483833953"),
