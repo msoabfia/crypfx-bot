@@ -11,7 +11,7 @@ from curl_cffi import requests as cffi_requests
 from flask import Flask
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
-from telegram.error import TimedOut, NetworkError, Forbidden
+from telegram.error import TimedOut, NetworkError, Forbidden, Conflict
 import logging
 import threading
 
@@ -121,16 +121,13 @@ def fetch_yahoo(symbol):
 # =============== تابع تشخیص تعطیلات رسمی (با کش روزانه) ===============
 
 def is_holiday_today():
-    """بررسی می‌کند که امروز در آمریکا تعطیل رسمی است یا نه (با کش روزانه)"""
     with holiday_cache['lock']:
         today = datetime.now().strftime('%Y-%m-%d')
-        
         if holiday_cache['date'] == today:
             return holiday_cache['is_holiday']
         
         api_key = os.environ.get('CALENDARIFIC_API_KEY')
         if not api_key:
-            print("⚠️ CALENDARIFIC_API_KEY تنظیم نشده است. تشخیص تعطیلات غیرفعال.")
             holiday_cache['date'] = today
             holiday_cache['is_holiday'] = False
             return False
@@ -147,7 +144,6 @@ def is_holiday_today():
                         holiday_cache['date'] = today
                         holiday_cache['is_holiday'] = True
                         return True
-            print("✅ امروز تعطیل رسمی نیست.")
             holiday_cache['date'] = today
             holiday_cache['is_holiday'] = False
             return False
@@ -325,7 +321,6 @@ def refresh_price_cache():
                         new_data[symbol] = {'new': last, 'old_24h': old_24h}
         price_cache['data'] = new_data
         price_cache['last_update'] = now
-        
         clean_old_prices(30)
 
 def get_cached_price_with_24h(symbol):
@@ -746,18 +741,10 @@ async def auto_send_loop():
             print(f"❌ خطا در حلقه خودکار: {e}")
             await asyncio.sleep(INTERVAL)
 
-def start_auto_send():
-    """اجرای حلقه ارسال خودکار در یک حلقه رویداد مستقل"""
-    try:
-        # ایجاد یک حلقه رویداد جدید برای این ترد
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(auto_send_loop())
-    except Exception as e:
-        print(f"❌ خطا در start_auto_send: {e}")
-
 def run_bot_in_main_thread():
     app = Application.builder().token(TELEGRAM_TOKEN).connect_timeout(TIMEOUT).read_timeout(TIMEOUT).build()
+    
+    # هندلرها
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("gold", gold))
@@ -779,6 +766,18 @@ def run_bot_in_main_thread():
     app.add_handler(CommandHandler("all", all_status))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CallbackQueryHandler(button_handler))
+    
+    # حذف Webhook قبل از شروع Polling
+    try:
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(app.bot.delete_webhook())
+        loop.close()
+        print("✅ Webhook پاک شد.")
+    except Exception as e:
+        print(f"⚠️ خطا در پاک کردن Webhook: {e}")
+    
     print("🤖 ربات در حال اجرا...")
     app.run_polling()
 
@@ -798,11 +797,12 @@ def run_flask():
 
 if __name__ == '__main__':
     init_db()
-
+    
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-
+    
+    # اجرای حلقه ارسال خودکار در یک ترد جداگانه اما با مدیریت بهتر
     auto_thread = threading.Thread(target=start_auto_send, daemon=True)
     auto_thread.start()
-
+    
     run_bot_in_main_thread()
