@@ -204,19 +204,15 @@ def is_market_open(symbol_key):
     now = datetime.now()
     today = now.weekday()
 
-    # ارزهای دیجیتال (همیشه باز)
     if symbol_key in ['btc', 'eth', 'bnb', 'gram', 'xrp', 'sol', 'doge', 'bch', 'ltc', 'trx', 'dot']:
         return True
 
-    # بازارهای جهانی: شنبه و یکشنبه تعطیل
     if today in [5, 6]:
         return False
 
-    # تعطیلات رسمی (آمریکا)
     if is_holiday_today():
         return False
 
-    # قوانین خاص برای شکر (ساعت کاری)
     if symbol_key == 'sugar':
         iran_hour = (now.hour + 3) % 24
         iran_minute = now.minute + 30
@@ -751,8 +747,12 @@ async def auto_send_loop():
             await asyncio.sleep(INTERVAL)
 
 def start_auto_send():
+    """اجرای حلقه ارسال خودکار در یک حلقه رویداد مستقل"""
     try:
-        asyncio.run(auto_send_loop())
+        # ایجاد یک حلقه رویداد جدید برای این ترد
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(auto_send_loop())
     except Exception as e:
         print(f"❌ خطا در start_auto_send: {e}")
 
