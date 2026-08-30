@@ -198,7 +198,7 @@ def fetch_price_from_source(symbol_key):
         return round(price / 100, 4) if price else None
     return None
 
-# =============== تابع تشخیص بازار باز/بسته (با تعطیلات رسمی) ===============
+# =============== تابع تشخیص بازار باز/بسته ===============
 
 def is_market_open(symbol_key):
     now = datetime.now()
@@ -240,6 +240,7 @@ def init_db():
                  (user_id INTEGER, symbol TEXT, PRIMARY KEY (user_id, symbol))''')
     conn.commit()
     conn.close()
+    print("✅ دیتابیس مقداردهی اولیه شد.")
 
 def save_price(symbol, price):
     conn = sqlite3.connect(DB_PATH)
@@ -524,6 +525,7 @@ async def show_all_symbols(chat_id, user_id, query=None):
 async def start(update, context):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
+    print(f"📥 کاربر {user_id} دستور /start را اجرا کرد.")
     await show_main_menu(chat_id, user_id)
 
 async def button_handler(update, context):
@@ -532,6 +534,7 @@ async def button_handler(update, context):
     user_id = query.from_user.id
     chat_id = query.message.chat.id
     data = query.data
+    print(f"📥 کاربر {user_id} روی دکمه {data} کلیک کرد.")
 
     if data == "back_categories":
         await show_main_menu(chat_id, user_id, query)
@@ -583,12 +586,14 @@ async def button_handler(update, context):
         with sending_lock:
             sending_active[user_id] = True
             last_sent_summary[user_id] = ""
+        print(f"🚀 ارسال خودکار برای کاربر {user_id} فعال شد.")
         await query.edit_message_text("🚀 **ارسال خودکار شروع شد!**\nهر ۱ دقیقه قیمت‌های انتخاب‌شده ارسال می‌شود.", parse_mode='Markdown')
         return
 
     if data == "stop_sending":
         with sending_lock:
             sending_active[user_id] = False
+        print(f"🛑 ارسال خودکار برای کاربر {user_id} متوقف شد.")
         await query.edit_message_text("🛑 **ارسال خودکار متوقف شد.**", parse_mode='Markdown')
         return
 
@@ -679,18 +684,28 @@ async def help_command(update, context):
 async def auto_send_loop():
     bot = Bot(token=TELEGRAM_TOKEN)
     last_cleanup = time.time()
+    print("🔄 حلقه ارسال خودکار شروع شد.")
     while True:
         try:
+            print("⏳ شروع یک سیکل جدید ارسال خودکار...")
             refresh_price_cache()
             
             with sending_lock:
                 active_users = list(sending_active.items())
+            print(f"👥 تعداد کاربران فعال: {len(active_users)}")
+            
+            if not active_users:
+                print("📭 هیچ کاربر فعالی وجود ندارد.")
+                await asyncio.sleep(INTERVAL)
+                continue
             
             for user_id, is_active in active_users:
                 if not is_active:
                     continue
+                print(f"📨 در حال بررسی کاربر {user_id}...")
                 selections = get_user_selections(user_id)
                 if not selections:
+                    print(f"⚠️ کاربر {user_id} هیچ نمادی انتخاب نکرده است.")
                     with sending_lock:
                         sending_active[user_id] = False
                     continue
@@ -699,6 +714,7 @@ async def auto_send_loop():
                     with sending_lock:
                         last_msg = last_sent_summary.get(user_id, "")
                     if message != last_msg:
+                        print(f"📤 ارسال پیام جدید به کاربر {user_id}...")
                         keyboard = [[InlineKeyboardButton("⚙️ ویرایش نمادها", callback_data="show_all")]]
                         reply_markup = InlineKeyboardMarkup(keyboard)
                         
@@ -711,6 +727,7 @@ async def auto_send_loop():
                             )
                             with sending_lock:
                                 last_sent_summary[user_id] = message
+                            print(f"✅ پیام به کاربر {user_id} ارسال شد.")
                         except Forbidden as e:
                             print(f"🚫 کاربر {user_id} ربات را بلاک/حذف کرده است. ارسال متوقف شد.")
                             with sending_lock:
@@ -718,14 +735,19 @@ async def auto_send_loop():
                             clear_user_selections(user_id)
                         except Exception as e:
                             print(f"⚠️ خطا در ارسال به {user_id}: {e}")
+                    else:
+                        print(f"⏩ قیمت‌های کاربر {user_id} تغییری نکرده است.")
+                else:
+                    print(f"⚠️ پیامی برای کاربر {user_id} تولید نشد.")
             
             if time.time() - last_cleanup > 600:
                 clean_inactive_users()
                 last_cleanup = time.time()
             
+            print(f"⏳ انتظار {INTERVAL} ثانیه تا سیکل بعدی...")
             await asyncio.sleep(INTERVAL)
         except Exception as e:
-            print(f"⚠️ خطا در حلقه خودکار: {e}")
+            print(f"❌ خطا در حلقه خودکار: {e}")
             await asyncio.sleep(INTERVAL)
 
 def start_auto_send():
