@@ -741,6 +741,15 @@ async def auto_send_loop():
             print(f"❌ خطا در حلقه خودکار: {e}")
             await asyncio.sleep(INTERVAL)
 
+def start_auto_send():
+    """تابع راه‌اندازی حلقه ارسال خودکار در یک ترد جداگانه"""
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(auto_send_loop())
+    except Exception as e:
+        print(f"❌ خطا در start_auto_send: {e}")
+
 def run_bot_in_main_thread():
     app = Application.builder().token(TELEGRAM_TOKEN).connect_timeout(TIMEOUT).read_timeout(TIMEOUT).build()
     
@@ -769,7 +778,6 @@ def run_bot_in_main_thread():
     
     # حذف Webhook قبل از شروع Polling
     try:
-        import asyncio
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(app.bot.delete_webhook())
@@ -801,7 +809,6 @@ if __name__ == '__main__':
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     
-    # اجرای حلقه ارسال خودکار در یک ترد جداگانه اما با مدیریت بهتر
     auto_thread = threading.Thread(target=start_auto_send, daemon=True)
     auto_thread.start()
     
