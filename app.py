@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from curl_cffi import requests as cffi_requests
 from flask import Flask
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, JobQueue
 from telegram.error import TimedOut, NetworkError, Forbidden, Conflict
 import logging
 import threading
@@ -236,7 +236,10 @@ def init_db():
     conn.close()
     print("✅ دیتابیس مقداردهی اولیه شد.")
 
+# =============== توابع ذخیره و بازیابی وضعیت ارسال خودکار ===============
+
 def load_auto_send_statuses():
+    """بارگذاری وضعیت ارسال خودکار از دیتابیس به حافظه"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('SELECT user_id, active FROM auto_send_settings WHERE active = 1')
@@ -253,6 +256,8 @@ def save_auto_send_status(user_id, active):
     c.execute('INSERT OR REPLACE INTO auto_send_settings (user_id, active) VALUES (?, ?)', (user_id, 1 if active else 0))
     conn.commit()
     conn.close()
+
+# =============== بقیه توابع دیتابیس ===============
 
 def save_price(symbol, price):
     conn = sqlite3.connect(DB_PATH)
@@ -694,130 +699,96 @@ async def help_command(update, context):
         "/status - وضعیت دیتابیس\n"
     )
 
-async def auto_send_loop():
-    """حلقه اصلی ارسال خودکار - با لاگ‌های قوی برای عیب‌یابی"""
-    print("🔁 [AUTO_SEND] حلقه ارسال خودکار شروع شد (ورود به تابع).")
+# ================== تابع ارسال خودکار (Job) ==================
+
+async def auto_send_job(context: ContextTypes.DEFAULT_TYPE):
+    """این تابع هر INTERVAL ثانیه یک بار توسط JobQueue اجرا می‌شود"""
+    bot = context.bot
+    print("⏳ [JOB] شروع یک سیکل ارسال خودکار...")
+    
     try:
-        bot = Bot(token=TELEGRAM_TOKEN)
-        print("🔁 [AUTO_SEND] نمونه Bot ساخته شد.")
-        last_cleanup = time.time()
-        
-        print("🔁 [AUTO_SEND] بارگذاری وضعیت‌های ذخیره‌شده از دیتابیس...")
-        load_auto_send_statuses()
-        
-        while True:
-            print("⏳ [AUTO_SEND] شروع یک سیکل جدید ارسال خودکار...")
-            try:
-                refresh_price_cache()
-            except Exception as e:
-                print(f"❌ [AUTO_SEND] خطا در refresh_price_cache: {e}")
-                await asyncio.sleep(INTERVAL)
-                continue
-            
-            # همگام‌سازی وضعیت‌های دیتابیس با حافظه
-            try:
-                with sending_lock:
-                    conn = sqlite3.connect(DB_PATH)
-                    c = conn.cursor()
-                    c.execute('SELECT user_id, active FROM auto_send_settings WHERE active = 1')
-                    rows = c.fetchall()
-                    conn.close()
-                    for user_id, active in rows:
-                        if user_id not in sending_active or sending_active[user_id] != bool(active):
-                            sending_active[user_id] = bool(active)
-                            if user_id not in last_sent_summary:
-                                last_sent_summary[user_id] = ""
-            except Exception as e:
-                print(f"❌ [AUTO_SEND] خطا در همگام‌سازی دیتابیس: {e}")
-                await asyncio.sleep(INTERVAL)
-                continue
-            
-            active_users = list(sending_active.items())
-            print(f"👥 [AUTO_SEND] تعداد کاربران فعال: {len(active_users)}")
-            
-            if not active_users:
-                print("📭 [AUTO_SEND] هیچ کاربر فعالی وجود ندارد.")
-                await asyncio.sleep(INTERVAL)
-                continue
-            
-            for user_id, is_active in active_users:
-                if not is_active:
-                    continue
-                print(f"📨 [AUTO_SEND] در حال بررسی کاربر {user_id}...")
+        refresh_price_cache()
+    except Exception as e:
+        print(f"❌ [JOB] خطا در refresh_price_cache: {e}")
+        return
+    
+    # همگام‌سازی وضعیت‌های دیتابیس با حافظه
+    try:
+        with sending_lock:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute('SELECT user_id, active FROM auto_send_settings WHERE active = 1')
+            rows = c.fetchall()
+            conn.close()
+            for user_id, active in rows:
+                if user_id not in sending_active or sending_active[user_id] != bool(active):
+                    sending_active[user_id] = bool(active)
+                    if user_id not in last_sent_summary:
+                        last_sent_summary[user_id] = ""
+    except Exception as e:
+        print(f"❌ [JOB] خطا در همگام‌سازی دیتابیس: {e}")
+        return
+    
+    active_users = list(sending_active.items())
+    print(f"👥 [JOB] کاربران فعال: {len(active_users)}")
+    
+    if not active_users:
+        print("📭 [JOB] هیچ کاربر فعالی وجود ندارد.")
+        return
+    
+    for user_id, is_active in active_users:
+        if not is_active:
+            continue
+        print(f"📨 [JOB] بررسی کاربر {user_id}...")
+        selections = get_user_selections(user_id)
+        if not selections:
+            print(f"⚠️ [JOB] کاربر {user_id} بدون نماد. غیرفعال می‌شود.")
+            with sending_lock:
+                sending_active[user_id] = False
+            save_auto_send_status(user_id, False)
+            continue
+        message = generate_price_message(selections)
+        if message:
+            with sending_lock:
+                last_msg = last_sent_summary.get(user_id, "")
+            if message != last_msg:
+                print(f"📤 [JOB] ارسال به {user_id}...")
+                keyboard = [[InlineKeyboardButton("⚙️ ویرایش نمادها", callback_data="show_all")]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
                 try:
-                    selections = get_user_selections(user_id)
-                except Exception as e:
-                    print(f"❌ [AUTO_SEND] خطا در دریافت انتخاب‌های کاربر {user_id}: {e}")
-                    continue
-                if not selections:
-                    print(f"⚠️ [AUTO_SEND] کاربر {user_id} هیچ نمادی انتخاب نکرده است. ارسال خودکار غیرفعال می‌شود.")
+                    await bot.send_message(
+                        user_id,
+                        f"🔔 **به‌روزرسانی قیمت‌ها**\n━━━━━━━━━━━━━━━━━━━\n{message}",
+                        parse_mode='Markdown',
+                        reply_markup=reply_markup
+                    )
+                    with sending_lock:
+                        last_sent_summary[user_id] = message
+                    print(f"✅ [JOB] ارسال به {user_id} موفق.")
+                except Forbidden:
+                    print(f"🚫 [JOB] کاربر {user_id} بلاک کرده.")
                     with sending_lock:
                         sending_active[user_id] = False
                     save_auto_send_status(user_id, False)
-                    continue
-                try:
-                    message = generate_price_message(selections)
+                    clear_user_selections(user_id)
                 except Exception as e:
-                    print(f"❌ [AUTO_SEND] خطا در تولید پیام برای کاربر {user_id}: {e}")
-                    continue
-                if message:
-                    with sending_lock:
-                        last_msg = last_sent_summary.get(user_id, "")
-                    if message != last_msg:
-                        print(f"📤 [AUTO_SEND] ارسال پیام جدید به کاربر {user_id}...")
-                        keyboard = [[InlineKeyboardButton("⚙️ ویرایش نمادها", callback_data="show_all")]]
-                        reply_markup = InlineKeyboardMarkup(keyboard)
-                        
-                        try:
-                            await bot.send_message(
-                                user_id,
-                                f"🔔 **به‌روزرسانی قیمت‌ها**\n━━━━━━━━━━━━━━━━━━━\n{message}",
-                                parse_mode='Markdown',
-                                reply_markup=reply_markup
-                            )
-                            with sending_lock:
-                                last_sent_summary[user_id] = message
-                            print(f"✅ [AUTO_SEND] پیام به کاربر {user_id} ارسال شد.")
-                        except Forbidden as e:
-                            print(f"🚫 [AUTO_SEND] کاربر {user_id} ربات را بلاک/حذف کرده است. ارسال متوقف شد.")
-                            with sending_lock:
-                                sending_active[user_id] = False
-                            save_auto_send_status(user_id, False)
-                            clear_user_selections(user_id)
-                        except Exception as e:
-                            print(f"⚠️ [AUTO_SEND] خطا در ارسال به {user_id}: {e}")
-                    else:
-                        print(f"⏩ [AUTO_SEND] قیمت‌های کاربر {user_id} تغییری نکرده است.")
-                else:
-                    print(f"⚠️ [AUTO_SEND] پیامی برای کاربر {user_id} تولید نشد.")
-            
-            if time.time() - last_cleanup > 600:
-                try:
-                    clean_inactive_users()
-                except Exception as e:
-                    print(f"❌ [AUTO_SEND] خطا در clean_inactive_users: {e}")
-                last_cleanup = time.time()
-            
-            print(f"⏳ [AUTO_SEND] انتظار {INTERVAL} ثانیه تا سیکل بعدی...")
-            await asyncio.sleep(INTERVAL)
-    except Exception as e:
-        print(f"💥 [AUTO_SEND] خطای سطح بالا در حلقه ارسال خودکار: {e}")
-        import traceback
-        traceback.print_exc()
+                    print(f"⚠️ [JOB] خطا در ارسال به {user_id}: {e}")
+            else:
+                print(f"⏩ [JOB] قیمت‌های {user_id} تغییر نکرده.")
+        else:
+            print(f"⚠️ [JOB] پیامی برای {user_id} تولید نشد.")
 
-# =============== راه‌اندازی ربات با مدیریت صحیح حلقه رویداد ===============
+# =============== راه‌اندازی ربات با JobQueue ===============
+
 async def run_bot_async():
-    """تابع اصلی async برای راه‌اندازی ربات و حلقه ارسال خودکار"""
+    """تابع اصلی async برای راه‌اندازی ربات و JobQueue"""
     print("🚀 [MAIN] run_bot_async شروع شد.")
     
-    # ایجاد Task برای حلقه ارسال خودکار
-    loop = asyncio.get_running_loop()
-    print(f"🔄 [MAIN] حلقه رویداد در حال اجرا: {loop}")
-    task = asyncio.create_task(auto_send_loop())
-    print(f"✅ [MAIN] Task auto_send_loop ایجاد شد: {task}")
-    
-    # ساخت اپلیکیشن تلگرام
+    # ساخت اپلیکیشن
     app = Application.builder().token(TELEGRAM_TOKEN).connect_timeout(TIMEOUT).read_timeout(TIMEOUT).build()
+    
+    # بارگذاری وضعیت‌های ذخیره‌شده از دیتابیس (قبل از شروع)
+    load_auto_send_statuses()
     
     # اضافه کردن هندلرها
     app.add_handler(CommandHandler("start", start))
@@ -841,6 +812,14 @@ async def run_bot_async():
     app.add_handler(CommandHandler("all", all_status))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CallbackQueryHandler(button_handler))
+    
+    # تنظیم JobQueue
+    job_queue = app.job_queue
+    if job_queue:
+        job_queue.run_repeating(auto_send_job, interval=INTERVAL, first=5)
+        print(f"✅ JobQueue تنظیم شد (هر {INTERVAL} ثانیه).")
+    else:
+        print("⚠️ JobQueue در دسترس نیست!")
     
     # حذف Webhook
     try:
@@ -889,5 +868,5 @@ if __name__ == '__main__':
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     
-    # اجرای ربات در ترد اصلی (حلقه ارسال خودکار در همان حلقه اجرا می‌شود)
+    # اجرای ربات در ترد اصلی (JobQueue داخل آن کار می‌کند)
     run_bot_in_main_thread()
