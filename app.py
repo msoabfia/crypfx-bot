@@ -180,7 +180,7 @@ def fetch_price_from_source(symbol_key):
     elif symbol_key == 'trx':
         return fetch_yahoo('TRX-USD')
     elif symbol_key == 'gold':
-        return fetch_yahoo('XAUT-USD')
+        return fetch_yahoo('XAUT-USD')  # ← اصلاح: قیمت اسپات طلا
     elif symbol_key == 'silver':
         return fetch_yahoo('SI=F')
     elif symbol_key == 'oil':
