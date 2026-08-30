@@ -324,15 +324,28 @@ def run_flask():
     flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
 
 # ======================== اجرا ========================
-if __name__ == '__main__':
-    init_db()
-    threading.Thread(target=run_flask, daemon=True).start()
+def run_bot_in_main_thread():
     app = Application.builder().token(TELEGRAM_TOKEN).connect_timeout(TIMEOUT).read_timeout(TIMEOUT).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("all", all_cmd))
     app.add_handler(CommandHandler("myprices", myprices))
     app.add_handler(CallbackQueryHandler(button))
-    asyncio.run(app.bot.delete_webhook())
+    
+    # حذف Webhook با استفاده از حلقه‌ی جاری (رفع خطای Event loop is closed)
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        loop.run_until_complete(app.bot.delete_webhook())
+    except Exception as e:
+        print(f"⚠️ خطا در حذف Webhook: {e}")
+    
     print("🤖 ربات در حال اجرا...")
     app.run_polling()
+
+if __name__ == '__main__':
+    init_db()
+    threading.Thread(target=run_flask, daemon=True).start()
+    run_bot_in_main_thread()
