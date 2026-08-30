@@ -74,6 +74,13 @@ price_cache = {
     'lock': threading.Lock()
 }
 
+# =============== کش تعطیلات رسمی (هر روز یک بار) ===============
+holiday_cache = {
+    'date': '',
+    'is_holiday': False,
+    'lock': threading.Lock()
+}
+
 # =============== دیکشنری‌های سراسری با قفل ===============
 sending_active = {}
 last_sent_summary = {}
@@ -111,6 +118,45 @@ def fetch_yahoo(symbol):
         print(f"❌ Error fetching {symbol}: {e}")
         return None
 
+# =============== تابع تشخیص تعطیلات رسمی (با کش روزانه) ===============
+
+def is_holiday_today():
+    """بررسی می‌کند که امروز در آمریکا تعطیل رسمی است یا نه (با کش روزانه)"""
+    with holiday_cache['lock']:
+        today = datetime.now().strftime('%Y-%m-%d')
+        
+        if holiday_cache['date'] == today:
+            return holiday_cache['is_holiday']
+        
+        api_key = os.environ.get('CALENDARIFIC_API_KEY')
+        if not api_key:
+            print("⚠️ CALENDARIFIC_API_KEY تنظیم نشده است. تشخیص تعطیلات غیرفعال.")
+            holiday_cache['date'] = today
+            holiday_cache['is_holiday'] = False
+            return False
+        
+        try:
+            url = f"https://calendarific.com/api/v2/holidays?api_key={api_key}&country=US&year={datetime.now().year}&day={today}"
+            resp = requests.get(url, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get('meta', {}).get('code') == 200:
+                    holidays = data.get('response', {}).get('holidays', [])
+                    if holidays:
+                        print(f"📅 امروز تعطیل رسمی است: {holidays[0].get('name')}")
+                        holiday_cache['date'] = today
+                        holiday_cache['is_holiday'] = True
+                        return True
+            print("✅ امروز تعطیل رسمی نیست.")
+            holiday_cache['date'] = today
+            holiday_cache['is_holiday'] = False
+            return False
+        except Exception as e:
+            print(f"⚠️ خطا در تشخیص تعطیلات: {e}")
+            holiday_cache['date'] = today
+            holiday_cache['is_holiday'] = False
+            return False
+
 # =============== تابع دریافت قیمت با بررسی بازار ===============
 
 def fetch_price_from_source(symbol_key):
@@ -138,7 +184,7 @@ def fetch_price_from_source(symbol_key):
     elif symbol_key == 'trx':
         return fetch_yahoo('TRX-USD')
     elif symbol_key == 'gold':
-        return fetch_yahoo('GC=F')
+        return fetch_yahoo('XAUT-USD')
     elif symbol_key == 'silver':
         return fetch_yahoo('SI=F')
     elif symbol_key == 'oil':
@@ -152,18 +198,25 @@ def fetch_price_from_source(symbol_key):
         return round(price / 100, 4) if price else None
     return None
 
-# =============== تابع تشخیص بازار باز/بسته ===============
+# =============== تابع تشخیص بازار باز/بسته (با تعطیلات رسمی) ===============
 
 def is_market_open(symbol_key):
     now = datetime.now()
     today = now.weekday()
-    
+
+    # ارزهای دیجیتال (همیشه باز)
     if symbol_key in ['btc', 'eth', 'bnb', 'gram', 'xrp', 'sol', 'doge', 'bch', 'ltc', 'trx', 'dot']:
         return True
-    
+
+    # بازارهای جهانی: شنبه و یکشنبه تعطیل
     if today in [5, 6]:
         return False
-    
+
+    # تعطیلات رسمی (آمریکا)
+    if is_holiday_today():
+        return False
+
+    # قوانین خاص برای شکر (ساعت کاری)
     if symbol_key == 'sugar':
         iran_hour = (now.hour + 3) % 24
         iran_minute = now.minute + 30
@@ -171,7 +224,7 @@ def is_market_open(symbol_key):
             iran_hour = (iran_hour + 1) % 24
             iran_minute -= 60
         return 12 <= iran_hour < 21 or (iran_hour == 21 and iran_minute <= 30)
-    
+
     return True
 
 DB_PATH = "market_data.db"
@@ -646,7 +699,6 @@ async def auto_send_loop():
                     with sending_lock:
                         last_msg = last_sent_summary.get(user_id, "")
                     if message != last_msg:
-                        # اضافه کردن دکمه ویرایش نمادها به پیام
                         keyboard = [[InlineKeyboardButton("⚙️ ویرایش نمادها", callback_data="show_all")]]
                         reply_markup = InlineKeyboardMarkup(keyboard)
                         
