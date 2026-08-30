@@ -248,8 +248,6 @@ def load_auto_send_statuses():
     with sending_lock:
         for user_id, active in rows:
             sending_active[user_id] = bool(active)
-            # last_sent_summary را خالی می‌گذاریم تا بلافاصله پس از راه‌اندازی، پیام ارسال شود
-            # اما اگر می‌خواهید از ارسال تکراری جلوگیری کنید، می‌توانید آن را هم ذخیره کنید (اختیاری)
     print(f"📂 {len(rows)} کاربر فعال از دیتابیس بارگذاری شدند.")
 
 def save_auto_send_status(user_id, active):
@@ -613,7 +611,6 @@ async def button_handler(update, context):
         with sending_lock:
             sending_active[user_id] = True
             last_sent_summary[user_id] = ""
-        # ذخیره در دیتابیس
         save_auto_send_status(user_id, True)
         print(f"🚀 ارسال خودکار برای کاربر {user_id} فعال شد (ذخیره در دیتابیس).")
         await query.edit_message_text("🚀 **ارسال خودکار شروع شد!**\nهر ۱ دقیقه قیمت‌های انتخاب‌شده ارسال می‌شود.", parse_mode='Markdown')
@@ -622,7 +619,6 @@ async def button_handler(update, context):
     if data == "stop_sending":
         with sending_lock:
             sending_active[user_id] = False
-        # ذخیره در دیتابیس (غیرفعال)
         save_auto_send_status(user_id, False)
         print(f"🛑 ارسال خودکار برای کاربر {user_id} متوقف شد (ذخیره در دیتابیس).")
         await query.edit_message_text("🛑 **ارسال خودکار متوقف شد.**", parse_mode='Markdown')
@@ -713,6 +709,7 @@ async def help_command(update, context):
     )
 
 async def auto_send_loop():
+    """حلقه اصلی ارسال خودکار - در پس‌زمینه اجرا می‌شود"""
     bot = Bot(token=TELEGRAM_TOKEN)
     last_cleanup = time.time()
     print("🔄 حلقه ارسال خودکار شروع شد.")
@@ -725,10 +722,8 @@ async def auto_send_loop():
             print("⏳ شروع یک سیکل جدید ارسال خودکار...")
             refresh_price_cache()
             
-            # همگام‌سازی وضعیت‌های دیتابیس با حافظه (مثلاً اگر کاربری در دیتابیس فعال است ولی در حافظه نیست)
-            # این کار در صورت ری‌استارت همزمان انجام می‌شود
+            # همگام‌سازی وضعیت‌های دیتابیس با حافظه
             with sending_lock:
-                # بارگذاری مجدد از دیتابیس (اختیاری، برای مواردی که دیتابیس خارج از حلقه تغییر کرده باشد)
                 conn = sqlite3.connect(DB_PATH)
                 c = conn.cursor()
                 c.execute('SELECT user_id, active FROM auto_send_settings WHERE active = 1')
@@ -737,7 +732,6 @@ async def auto_send_loop():
                 for user_id, active in rows:
                     if user_id not in sending_active or sending_active[user_id] != bool(active):
                         sending_active[user_id] = bool(active)
-                        # اگر کاربر جدید فعال شده، last_sent_summary را خالی می‌گذاریم تا پیام ارسال شود
                         if user_id not in last_sent_summary:
                             last_sent_summary[user_id] = ""
             
@@ -802,17 +796,12 @@ async def auto_send_loop():
             print(f"❌ خطا در حلقه خودکار: {e}")
             await asyncio.sleep(INTERVAL)
 
-def start_auto_send():
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(auto_send_loop())
-    except Exception as e:
-        print(f"❌ خطا در start_auto_send: {e}")
-
 # =============== راه‌اندازی ربات با مدیریت صحیح حلقه رویداد ===============
 async def run_bot_async():
-    """تابع اصلی async برای راه‌اندازی ربات"""
+    """تابع اصلی async برای راه‌اندازی ربات و حلقه ارسال خودکار"""
+    # ایجاد یک Task برای حلقه ارسال خودکار
+    asyncio.create_task(auto_send_loop())
+    
     app = Application.builder().token(TELEGRAM_TOKEN).connect_timeout(TIMEOUT).read_timeout(TIMEOUT).build()
     
     # اضافه کردن هندلرها
@@ -885,7 +874,5 @@ if __name__ == '__main__':
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     
-    auto_thread = threading.Thread(target=start_auto_send, daemon=True)
-    auto_thread.start()
-    
+    # اجرای ربات در ترد اصلی (حلقه ارسال خودکار در همان حلقه اجرا می‌شود)
     run_bot_in_main_thread()
