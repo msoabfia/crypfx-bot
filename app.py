@@ -180,7 +180,7 @@ def fetch_price_from_source(symbol_key):
     elif symbol_key == 'trx':
         return fetch_yahoo('TRX-USD')
     elif symbol_key == 'gold':
-        return fetch_yahoo('XAUT-USD')  # ← اصلاح: قیمت اسپات طلا
+        return fetch_yahoo('XAUT-USD')
     elif symbol_key == 'silver':
         return fetch_yahoo('SI=F')
     elif symbol_key == 'oil':
@@ -230,9 +230,45 @@ def init_db():
                  (symbol TEXT, timestamp TEXT, price REAL, PRIMARY KEY (symbol, timestamp))''')
     c.execute('''CREATE TABLE IF NOT EXISTS user_selections
                  (user_id INTEGER, symbol TEXT, PRIMARY KEY (user_id, symbol))''')
+    c.execute('''CREATE TABLE IF NOT EXISTS auto_send_settings
+                 (user_id INTEGER PRIMARY KEY, active INTEGER)''')
     conn.commit()
     conn.close()
     print("✅ دیتابیس مقداردهی اولیه شد.")
+
+# =============== توابع ذخیره و بازیابی وضعیت ارسال خودکار ===============
+
+def load_auto_send_statuses():
+    """بارگذاری وضعیت ارسال خودکار از دیتابیس به حافظه"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT user_id, active FROM auto_send_settings WHERE active = 1')
+    rows = c.fetchall()
+    conn.close()
+    with sending_lock:
+        for user_id, active in rows:
+            sending_active[user_id] = bool(active)
+            # last_sent_summary را خالی می‌گذاریم تا بلافاصله پس از راه‌اندازی، پیام ارسال شود
+            # اما اگر می‌خواهید از ارسال تکراری جلوگیری کنید، می‌توانید آن را هم ذخیره کنید (اختیاری)
+    print(f"📂 {len(rows)} کاربر فعال از دیتابیس بارگذاری شدند.")
+
+def save_auto_send_status(user_id, active):
+    """ذخیره وضعیت ارسال خودکار در دیتابیس"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('INSERT OR REPLACE INTO auto_send_settings (user_id, active) VALUES (?, ?)', (user_id, 1 if active else 0))
+    conn.commit()
+    conn.close()
+
+def delete_auto_send_status(user_id):
+    """حذف وضعیت ارسال خودکار (در صورت تمایل)"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('DELETE FROM auto_send_settings WHERE user_id = ?', (user_id,))
+    conn.commit()
+    conn.close()
+
+# =============== بقیه توابع دیتابیس ===============
 
 def save_price(symbol, price):
     conn = sqlite3.connect(DB_PATH)
@@ -577,14 +613,18 @@ async def button_handler(update, context):
         with sending_lock:
             sending_active[user_id] = True
             last_sent_summary[user_id] = ""
-        print(f"🚀 ارسال خودکار برای کاربر {user_id} فعال شد.")
+        # ذخیره در دیتابیس
+        save_auto_send_status(user_id, True)
+        print(f"🚀 ارسال خودکار برای کاربر {user_id} فعال شد (ذخیره در دیتابیس).")
         await query.edit_message_text("🚀 **ارسال خودکار شروع شد!**\nهر ۱ دقیقه قیمت‌های انتخاب‌شده ارسال می‌شود.", parse_mode='Markdown')
         return
 
     if data == "stop_sending":
         with sending_lock:
             sending_active[user_id] = False
-        print(f"🛑 ارسال خودکار برای کاربر {user_id} متوقف شد.")
+        # ذخیره در دیتابیس (غیرفعال)
+        save_auto_send_status(user_id, False)
+        print(f"🛑 ارسال خودکار برای کاربر {user_id} متوقف شد (ذخیره در دیتابیس).")
         await query.edit_message_text("🛑 **ارسال خودکار متوقف شد.**", parse_mode='Markdown')
         return
 
@@ -676,13 +716,32 @@ async def auto_send_loop():
     bot = Bot(token=TELEGRAM_TOKEN)
     last_cleanup = time.time()
     print("🔄 حلقه ارسال خودکار شروع شد.")
+    
+    # بارگذاری وضعیت‌های ذخیره‌شده از دیتابیس
+    load_auto_send_statuses()
+    
     while True:
         try:
             print("⏳ شروع یک سیکل جدید ارسال خودکار...")
             refresh_price_cache()
             
+            # همگام‌سازی وضعیت‌های دیتابیس با حافظه (مثلاً اگر کاربری در دیتابیس فعال است ولی در حافظه نیست)
+            # این کار در صورت ری‌استارت همزمان انجام می‌شود
             with sending_lock:
-                active_users = list(sending_active.items())
+                # بارگذاری مجدد از دیتابیس (اختیاری، برای مواردی که دیتابیس خارج از حلقه تغییر کرده باشد)
+                conn = sqlite3.connect(DB_PATH)
+                c = conn.cursor()
+                c.execute('SELECT user_id, active FROM auto_send_settings WHERE active = 1')
+                rows = c.fetchall()
+                conn.close()
+                for user_id, active in rows:
+                    if user_id not in sending_active or sending_active[user_id] != bool(active):
+                        sending_active[user_id] = bool(active)
+                        # اگر کاربر جدید فعال شده، last_sent_summary را خالی می‌گذاریم تا پیام ارسال شود
+                        if user_id not in last_sent_summary:
+                            last_sent_summary[user_id] = ""
+            
+            active_users = list(sending_active.items())
             print(f"👥 تعداد کاربران فعال: {len(active_users)}")
             
             if not active_users:
@@ -696,9 +755,10 @@ async def auto_send_loop():
                 print(f"📨 در حال بررسی کاربر {user_id}...")
                 selections = get_user_selections(user_id)
                 if not selections:
-                    print(f"⚠️ کاربر {user_id} هیچ نمادی انتخاب نکرده است.")
+                    print(f"⚠️ کاربر {user_id} هیچ نمادی انتخاب نکرده است. ارسال خودکار غیرفعال می‌شود.")
                     with sending_lock:
                         sending_active[user_id] = False
+                    save_auto_send_status(user_id, False)
                     continue
                 message = generate_price_message(selections)
                 if message:
@@ -723,6 +783,7 @@ async def auto_send_loop():
                             print(f"🚫 کاربر {user_id} ربات را بلاک/حذف کرده است. ارسال متوقف شد.")
                             with sending_lock:
                                 sending_active[user_id] = False
+                            save_auto_send_status(user_id, False)
                             clear_user_selections(user_id)
                         except Exception as e:
                             print(f"⚠️ خطا در ارسال به {user_id}: {e}")
