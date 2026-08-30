@@ -236,10 +236,7 @@ def init_db():
     conn.close()
     print("✅ دیتابیس مقداردهی اولیه شد.")
 
-# =============== توابع ذخیره و بازیابی وضعیت ارسال خودکار ===============
-
 def load_auto_send_statuses():
-    """بارگذاری وضعیت ارسال خودکار از دیتابیس به حافظه"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('SELECT user_id, active FROM auto_send_settings WHERE active = 1')
@@ -251,22 +248,11 @@ def load_auto_send_statuses():
     print(f"📂 {len(rows)} کاربر فعال از دیتابیس بارگذاری شدند.")
 
 def save_auto_send_status(user_id, active):
-    """ذخیره وضعیت ارسال خودکار در دیتابیس"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('INSERT OR REPLACE INTO auto_send_settings (user_id, active) VALUES (?, ?)', (user_id, 1 if active else 0))
     conn.commit()
     conn.close()
-
-def delete_auto_send_status(user_id):
-    """حذف وضعیت ارسال خودکار (در صورت تمایل)"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('DELETE FROM auto_send_settings WHERE user_id = ?', (user_id,))
-    conn.commit()
-    conn.close()
-
-# =============== بقیه توابع دیتابیس ===============
 
 def save_price(symbol, price):
     conn = sqlite3.connect(DB_PATH)
@@ -709,57 +695,76 @@ async def help_command(update, context):
     )
 
 async def auto_send_loop():
-    """حلقه اصلی ارسال خودکار - در پس‌زمینه اجرا می‌شود"""
-    bot = Bot(token=TELEGRAM_TOKEN)
-    last_cleanup = time.time()
-    print("🔄 حلقه ارسال خودکار شروع شد.")
-    
-    # بارگذاری وضعیت‌های ذخیره‌شده از دیتابیس
-    load_auto_send_statuses()
-    
-    while True:
-        try:
-            print("⏳ شروع یک سیکل جدید ارسال خودکار...")
-            refresh_price_cache()
+    """حلقه اصلی ارسال خودکار - با لاگ‌های قوی برای عیب‌یابی"""
+    print("🔁 [AUTO_SEND] حلقه ارسال خودکار شروع شد (ورود به تابع).")
+    try:
+        bot = Bot(token=TELEGRAM_TOKEN)
+        print("🔁 [AUTO_SEND] نمونه Bot ساخته شد.")
+        last_cleanup = time.time()
+        
+        print("🔁 [AUTO_SEND] بارگذاری وضعیت‌های ذخیره‌شده از دیتابیس...")
+        load_auto_send_statuses()
+        
+        while True:
+            print("⏳ [AUTO_SEND] شروع یک سیکل جدید ارسال خودکار...")
+            try:
+                refresh_price_cache()
+            except Exception as e:
+                print(f"❌ [AUTO_SEND] خطا در refresh_price_cache: {e}")
+                await asyncio.sleep(INTERVAL)
+                continue
             
             # همگام‌سازی وضعیت‌های دیتابیس با حافظه
-            with sending_lock:
-                conn = sqlite3.connect(DB_PATH)
-                c = conn.cursor()
-                c.execute('SELECT user_id, active FROM auto_send_settings WHERE active = 1')
-                rows = c.fetchall()
-                conn.close()
-                for user_id, active in rows:
-                    if user_id not in sending_active or sending_active[user_id] != bool(active):
-                        sending_active[user_id] = bool(active)
-                        if user_id not in last_sent_summary:
-                            last_sent_summary[user_id] = ""
+            try:
+                with sending_lock:
+                    conn = sqlite3.connect(DB_PATH)
+                    c = conn.cursor()
+                    c.execute('SELECT user_id, active FROM auto_send_settings WHERE active = 1')
+                    rows = c.fetchall()
+                    conn.close()
+                    for user_id, active in rows:
+                        if user_id not in sending_active or sending_active[user_id] != bool(active):
+                            sending_active[user_id] = bool(active)
+                            if user_id not in last_sent_summary:
+                                last_sent_summary[user_id] = ""
+            except Exception as e:
+                print(f"❌ [AUTO_SEND] خطا در همگام‌سازی دیتابیس: {e}")
+                await asyncio.sleep(INTERVAL)
+                continue
             
             active_users = list(sending_active.items())
-            print(f"👥 تعداد کاربران فعال: {len(active_users)}")
+            print(f"👥 [AUTO_SEND] تعداد کاربران فعال: {len(active_users)}")
             
             if not active_users:
-                print("📭 هیچ کاربر فعالی وجود ندارد.")
+                print("📭 [AUTO_SEND] هیچ کاربر فعالی وجود ندارد.")
                 await asyncio.sleep(INTERVAL)
                 continue
             
             for user_id, is_active in active_users:
                 if not is_active:
                     continue
-                print(f"📨 در حال بررسی کاربر {user_id}...")
-                selections = get_user_selections(user_id)
+                print(f"📨 [AUTO_SEND] در حال بررسی کاربر {user_id}...")
+                try:
+                    selections = get_user_selections(user_id)
+                except Exception as e:
+                    print(f"❌ [AUTO_SEND] خطا در دریافت انتخاب‌های کاربر {user_id}: {e}")
+                    continue
                 if not selections:
-                    print(f"⚠️ کاربر {user_id} هیچ نمادی انتخاب نکرده است. ارسال خودکار غیرفعال می‌شود.")
+                    print(f"⚠️ [AUTO_SEND] کاربر {user_id} هیچ نمادی انتخاب نکرده است. ارسال خودکار غیرفعال می‌شود.")
                     with sending_lock:
                         sending_active[user_id] = False
                     save_auto_send_status(user_id, False)
                     continue
-                message = generate_price_message(selections)
+                try:
+                    message = generate_price_message(selections)
+                except Exception as e:
+                    print(f"❌ [AUTO_SEND] خطا در تولید پیام برای کاربر {user_id}: {e}")
+                    continue
                 if message:
                     with sending_lock:
                         last_msg = last_sent_summary.get(user_id, "")
                     if message != last_msg:
-                        print(f"📤 ارسال پیام جدید به کاربر {user_id}...")
+                        print(f"📤 [AUTO_SEND] ارسال پیام جدید به کاربر {user_id}...")
                         keyboard = [[InlineKeyboardButton("⚙️ ویرایش نمادها", callback_data="show_all")]]
                         reply_markup = InlineKeyboardMarkup(keyboard)
                         
@@ -772,36 +777,46 @@ async def auto_send_loop():
                             )
                             with sending_lock:
                                 last_sent_summary[user_id] = message
-                            print(f"✅ پیام به کاربر {user_id} ارسال شد.")
+                            print(f"✅ [AUTO_SEND] پیام به کاربر {user_id} ارسال شد.")
                         except Forbidden as e:
-                            print(f"🚫 کاربر {user_id} ربات را بلاک/حذف کرده است. ارسال متوقف شد.")
+                            print(f"🚫 [AUTO_SEND] کاربر {user_id} ربات را بلاک/حذف کرده است. ارسال متوقف شد.")
                             with sending_lock:
                                 sending_active[user_id] = False
                             save_auto_send_status(user_id, False)
                             clear_user_selections(user_id)
                         except Exception as e:
-                            print(f"⚠️ خطا در ارسال به {user_id}: {e}")
+                            print(f"⚠️ [AUTO_SEND] خطا در ارسال به {user_id}: {e}")
                     else:
-                        print(f"⏩ قیمت‌های کاربر {user_id} تغییری نکرده است.")
+                        print(f"⏩ [AUTO_SEND] قیمت‌های کاربر {user_id} تغییری نکرده است.")
                 else:
-                    print(f"⚠️ پیامی برای کاربر {user_id} تولید نشد.")
+                    print(f"⚠️ [AUTO_SEND] پیامی برای کاربر {user_id} تولید نشد.")
             
             if time.time() - last_cleanup > 600:
-                clean_inactive_users()
+                try:
+                    clean_inactive_users()
+                except Exception as e:
+                    print(f"❌ [AUTO_SEND] خطا در clean_inactive_users: {e}")
                 last_cleanup = time.time()
             
-            print(f"⏳ انتظار {INTERVAL} ثانیه تا سیکل بعدی...")
+            print(f"⏳ [AUTO_SEND] انتظار {INTERVAL} ثانیه تا سیکل بعدی...")
             await asyncio.sleep(INTERVAL)
-        except Exception as e:
-            print(f"❌ خطا در حلقه خودکار: {e}")
-            await asyncio.sleep(INTERVAL)
+    except Exception as e:
+        print(f"💥 [AUTO_SEND] خطای سطح بالا در حلقه ارسال خودکار: {e}")
+        import traceback
+        traceback.print_exc()
 
 # =============== راه‌اندازی ربات با مدیریت صحیح حلقه رویداد ===============
 async def run_bot_async():
     """تابع اصلی async برای راه‌اندازی ربات و حلقه ارسال خودکار"""
-    # ایجاد یک Task برای حلقه ارسال خودکار
-    asyncio.create_task(auto_send_loop())
+    print("🚀 [MAIN] run_bot_async شروع شد.")
     
+    # ایجاد Task برای حلقه ارسال خودکار
+    loop = asyncio.get_running_loop()
+    print(f"🔄 [MAIN] حلقه رویداد در حال اجرا: {loop}")
+    task = asyncio.create_task(auto_send_loop())
+    print(f"✅ [MAIN] Task auto_send_loop ایجاد شد: {task}")
+    
+    # ساخت اپلیکیشن تلگرام
     app = Application.builder().token(TELEGRAM_TOKEN).connect_timeout(TIMEOUT).read_timeout(TIMEOUT).build()
     
     # اضافه کردن هندلرها
