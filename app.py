@@ -742,7 +742,6 @@ async def auto_send_loop():
             await asyncio.sleep(INTERVAL)
 
 def start_auto_send():
-    """تابع راه‌اندازی حلقه ارسال خودکار در یک ترد جداگانه"""
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -753,7 +752,6 @@ def start_auto_send():
 def run_bot_in_main_thread():
     app = Application.builder().token(TELEGRAM_TOKEN).connect_timeout(TIMEOUT).read_timeout(TIMEOUT).build()
     
-    # هندلرها
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("gold", gold))
@@ -776,12 +774,9 @@ def run_bot_in_main_thread():
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CallbackQueryHandler(button_handler))
     
-    # حذف Webhook قبل از شروع Polling
+    # حذف Webhook با استفاده از asyncio.run() (بدون مدیریت دستی حلقه)
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(app.bot.delete_webhook())
-        loop.close()
+        asyncio.run(app.bot.delete_webhook())
         print("✅ Webhook پاک شد.")
     except Exception as e:
         print(f"⚠️ خطا در پاک کردن Webhook: {e}")
