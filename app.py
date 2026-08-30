@@ -749,9 +749,12 @@ def start_auto_send():
     except Exception as e:
         print(f"❌ خطا در start_auto_send: {e}")
 
-def run_bot_in_main_thread():
+# =============== راه‌اندازی ربات با مدیریت صحیح حلقه رویداد ===============
+async def run_bot_async():
+    """تابع اصلی async برای راه‌اندازی ربات"""
     app = Application.builder().token(TELEGRAM_TOKEN).connect_timeout(TIMEOUT).read_timeout(TIMEOUT).build()
     
+    # اضافه کردن هندلرها
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("gold", gold))
@@ -774,15 +777,32 @@ def run_bot_in_main_thread():
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CallbackQueryHandler(button_handler))
     
-    # حذف Webhook با استفاده از asyncio.run() (بدون مدیریت دستی حلقه)
+    # حذف Webhook
     try:
-        asyncio.run(app.bot.delete_webhook())
+        await app.bot.delete_webhook()
         print("✅ Webhook پاک شد.")
     except Exception as e:
         print(f"⚠️ خطا در پاک کردن Webhook: {e}")
     
+    # شروع Polling
     print("🤖 ربات در حال اجرا...")
-    app.run_polling()
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    
+    # منتظر ماندن تا زمانی که ربات متوقف شود
+    try:
+        while True:
+            await asyncio.sleep(60)
+    except KeyboardInterrupt:
+        print("🛑 ربات متوقف شد.")
+    finally:
+        await app.stop()
+        await app.shutdown()
+
+def run_bot_in_main_thread():
+    """اجرای ربات در یک حلقه رویداد جدید"""
+    asyncio.run(run_bot_async())
 
 flask_app = Flask(__name__)
 
