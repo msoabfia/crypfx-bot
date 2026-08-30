@@ -53,16 +53,23 @@ def save_price(s, p):
 def save_closing(s, p):
     with sqlite3.connect(DB_PATH) as conn:
         conn.cursor().execute('INSERT OR REPLACE INTO closing_prices (symbol, timestamp, price) VALUES (?, ?, ?)', (s, datetime.now().isoformat(), p))
+
 def get_last(s):
     with sqlite3.connect(DB_PATH) as conn:
-        return conn.cursor().execute('SELECT price FROM prices WHERE symbol=? ORDER BY timestamp DESC LIMIT 1', (s,)).fetchone()[0] or None
+        row = conn.cursor().execute('SELECT price FROM prices WHERE symbol=? ORDER BY timestamp DESC LIMIT 1', (s,)).fetchone()
+        return row[0] if row else None
+
 def get_closing(s):
     with sqlite3.connect(DB_PATH) as conn:
-        return conn.cursor().execute('SELECT price FROM closing_prices WHERE symbol=? ORDER BY timestamp DESC LIMIT 1', (s,)).fetchone()[0] or None
+        row = conn.cursor().execute('SELECT price FROM closing_prices WHERE symbol=? ORDER BY timestamp DESC LIMIT 1', (s,)).fetchone()
+        return row[0] if row else None
+
 def get_24h(s):
     with sqlite3.connect(DB_PATH) as conn:
         t = (datetime.now() - timedelta(hours=24)).isoformat()
-        return conn.cursor().execute('SELECT price FROM prices WHERE symbol=? AND timestamp <= ? ORDER BY timestamp DESC LIMIT 1', (s, t)).fetchone()[0] or None
+        row = conn.cursor().execute('SELECT price FROM prices WHERE symbol=? AND timestamp <= ? ORDER BY timestamp DESC LIMIT 1', (s, t)).fetchone()
+        return row[0] if row else None
+
 def clean_old():
     with sqlite3.connect(DB_PATH) as conn:
         cutoff = (datetime.now() - timedelta(days=30)).isoformat()
@@ -281,7 +288,7 @@ async def single_status(update, symbol_key, name, emoji):
 for k, n, e in all_symbols():
     async def handler(update, context, key=k, name=n, emoji=e):
         await single_status(update, key, name, emoji)
-    globals()[k] = handler  # توابعی مثل btc, gold, sugar
+    globals()[k] = handler
 
 async def all_status(update, context):
     selections = get_sel(update.effective_user.id)
@@ -296,7 +303,7 @@ async def status_cmd(update, context):
 async def help_command(update, context):
     await send_msg(update.effective_chat.id, "📋 **دستورات:**\n/start - منوی اصلی\n/all - نمایش قیمت‌های انتخاب‌شده\n/status - وضعیت دیتابیس")
 
-# ============ ارسال خودکار (JobQueue) ============
+# ============ ارسال خودکار (با JobQueue) ============
 async def auto_send_job(context: ContextTypes.DEFAULT_TYPE):
     print("⏳ [JOB] شروع سیکل ارسال خودکار...")
     try: refresh_cache()
@@ -335,6 +342,8 @@ async def run_bot():
     if app.job_queue:
         app.job_queue.run_repeating(auto_send_job, interval=INTERVAL, first=5)
         print(f"✅ JobQueue تنظیم شد (هر {INTERVAL} ثانیه).")
+    else:
+        print("⚠️ JobQueue در دسترس نیست! لطفاً `python-telegram-bot[job-queue]` را نصب کنید.")
     await app.bot.delete_webhook()
     print("🤖 ربات در حال اجرا...")
     await app.initialize(); await app.start(); await app.updater.start_polling()
