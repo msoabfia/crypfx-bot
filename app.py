@@ -751,7 +751,10 @@ async def auto_send_loop():
             await asyncio.sleep(INTERVAL)
 
 def start_auto_send():
-    asyncio.run(auto_send_loop())
+    try:
+        asyncio.run(auto_send_loop())
+    except Exception as e:
+        print(f"❌ خطا در start_auto_send: {e}")
 
 def run_bot_in_main_thread():
     app = Application.builder().token(TELEGRAM_TOKEN).connect_timeout(TIMEOUT).read_timeout(TIMEOUT).build()
