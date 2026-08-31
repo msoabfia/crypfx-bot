@@ -280,9 +280,13 @@ async def run_bot():
     await app.bot.delete_webhook(); print("✅ Webhook cleared.")
     await app.initialize(); await app.start(); await app.updater.start_polling()
     print("🤖 Bot running...")
-    try: while True: await asyncio.sleep(60)
-    except KeyboardInterrupt: print("🛑 Stopping...")
-    finally: await app.stop(); await app.shutdown()
+    try:
+        while True:
+            await asyncio.sleep(60)
+    except KeyboardInterrupt:
+        print("🛑 Stopping...")
+    finally:
+        await app.stop(); await app.shutdown()
 
 def main():
     init_db()
