@@ -139,8 +139,9 @@ def gen_msg(selections):
         lines.append("")
     return "\n".join(lines) or "هیچ نمادی انتخاب نشده است."
 
+# =============== کیبورد با استیکرها (اصلاح‌شده) ===============
 def make_keyboard(selections, all_symbols):
-    kb = [[InlineKeyboardButton(f"{'✅ ' if sym in selections else ''}{name}", callback_data=f"toggle_{sym}")] for sym, name, _ in all_symbols]
+    kb = [[InlineKeyboardButton(f"{'✅ ' if sym in selections else ''}{emoji} {name}", callback_data=f"toggle_{sym}")] for sym, name, emoji in all_symbols]
     kb.extend([[InlineKeyboardButton("🔙 بازگشت به دسته‌ها", callback_data="back_categories")],
                [InlineKeyboardButton("📊 انتخاب همه", callback_data="select_all")],
                [InlineKeyboardButton("🚀 شروع ارسال", callback_data="start_sending")],
@@ -185,7 +186,7 @@ async def show_cat(chat_id, uid, cat_key, query=None):
 async def show_all(chat_id, uid, query=None):
     sels = get_user_sels(uid); all_syms = get_all_symbols()
     text = "📊 **همه نمادها**\n✅ روی هر نماد کلیک کنید.\nبعد از انتخاب روی **شروع ارسال** کلیک کنید.\n\n**انتخاب‌شده:**\n"
-    selected = [f"{e} {n}" for k,n,e in all_syms if k in sels]
+    selected = [f"{emoji} {name}" for _, name, emoji in all_syms if _ in sels]  # ← اصلاح: استیکر اضافه شد
     text += "\n".join(selected) if selected else "هیچ نمادی انتخاب نشده است."
     kb = make_keyboard(sels, all_syms)
     if query: await query.edit_message_text(text, parse_mode='Markdown', reply_markup=kb)
