@@ -139,7 +139,6 @@ def gen_msg(selections):
         lines.append("")
     return "\n".join(lines) or "هیچ نمادی انتخاب نشده است."
 
-# =============== کیبورد با استیکرها (اصلاح‌شده) ===============
 def make_keyboard(selections, all_symbols):
     kb = [[InlineKeyboardButton(f"{'✅ ' if sym in selections else ''}{emoji} {name}", callback_data=f"toggle_{sym}")] for sym, name, emoji in all_symbols]
     kb.extend([[InlineKeyboardButton("🔙 بازگشت به دسته‌ها", callback_data="back_categories")],
@@ -186,7 +185,7 @@ async def show_cat(chat_id, uid, cat_key, query=None):
 async def show_all(chat_id, uid, query=None):
     sels = get_user_sels(uid); all_syms = get_all_symbols()
     text = "📊 **همه نمادها**\n✅ روی هر نماد کلیک کنید.\nبعد از انتخاب روی **شروع ارسال** کلیک کنید.\n\n**انتخاب‌شده:**\n"
-    selected = [f"{emoji} {name}" for _, name, emoji in all_syms if _ in sels]  # ← اصلاح: استیکر اضافه شد
+    selected = [f"{emoji} {name}" for _, name, emoji in all_syms if _ in sels]
     text += "\n".join(selected) if selected else "هیچ نمادی انتخاب نشده است."
     kb = make_keyboard(sels, all_syms)
     if query: await query.edit_message_text(text, parse_mode='Markdown', reply_markup=kb)
@@ -264,6 +263,21 @@ async def auto_loop():
 
 def start_loop(): asyncio.run(auto_loop())
 
+# =============== Flask Web Service ===============
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def home():
+    return "✅ ربات در حال اجراست!", 200
+
+@flask_app.route('/health')
+def health():
+    return "OK", 200
+
+def run_flask():
+    port = int(os.environ.get('PORT', 10000))
+    flask_app.run(host='0.0.0.0', port=port)
+
 # =============== راه‌اندازی ===============
 async def run_bot():
     app = Application.builder().token(TELEGRAM_TOKEN).connect_timeout(TIMEOUT).read_timeout(TIMEOUT).build()
@@ -291,7 +305,7 @@ async def run_bot():
 
 def main():
     init_db()
-    threading.Thread(target=lambda: Flask(__name__).run(host='0.0.0.0', port=int(os.environ.get('PORT',10000))), daemon=True).start()
+    threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=start_loop, daemon=True).start()
     asyncio.run(run_bot())
 
