@@ -9,7 +9,8 @@ from telegram.error import Forbidden
 os.environ['TZ'] = 'UTC'
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 if not TELEGRAM_TOKEN: raise ValueError("TELEGRAM_TOKEN is not set!")
-INTERVAL, TIMEOUT, DB_PATH = 600, 30, "market_data.db"  # ← تغییر به ۶۰۰
+INTERVAL = 600  # ← تغییر به ۱۰ دقیقه (۶۰۰ ثانیه)
+TIMEOUT, DB_PATH = 30, "market_data.db"
 logging.basicConfig(level=logging.INFO)
 
 CATEGORIES = {
@@ -209,7 +210,7 @@ async def button(update, ctx):
     if data == "start_sending":
         if not get_user_sels(uid): await q.edit_message_text("⚠️ حداقل یک نماد انتخاب کنید.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_categories")]])); return
         with sending_lock: sending_active[uid], last_sent_summary[uid] = True, ""
-        save_status(uid, True); await q.edit_message_text("🚀 **ارسال خودکار شروع شد!**\nهر ۱ دقیقه قیمت‌ها ارسال می‌شود.", parse_mode='Markdown'); return
+        save_status(uid, True); await q.edit_message_text("🚀 **ارسال خودکار شروع شد!**\nهر ۱۰ دقیقه قیمت‌ها ارسال می‌شود.", parse_mode='Markdown'); return
     if data == "stop_sending":
         with sending_lock: sending_active[uid] = False
         save_status(uid, False); await q.edit_message_text("🛑 **ارسال خودکار متوقف شد.**", parse_mode='Markdown'); return
