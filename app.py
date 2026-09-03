@@ -1,4 +1,4 @@
-import os, asyncio, time, sqlite3, requests, re, json, logging, threading
+import os, asyncio, time, sqlite3, requests, re, json, logging, threading, random
 from datetime import datetime, timedelta
 from curl_cffi import requests as cffi_requests
 from flask import Flask
@@ -9,7 +9,8 @@ from telegram.error import Forbidden
 os.environ['TZ'] = 'UTC'
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 if not TELEGRAM_TOKEN: raise ValueError("TELEGRAM_TOKEN is not set!")
-INTERVAL, TIMEOUT, DB_PATH = 60, 30, "market_data.db"
+INTERVAL = 600  # ← هر ۱۰ دقیقه
+TIMEOUT, DB_PATH = 30, "market_data.db"
 logging.basicConfig(level=logging.INFO)
 
 CATEGORIES = {
@@ -24,6 +25,17 @@ CATEGORIES = {
     'agriculture': {'name': 'کشاورزی', 'emoji': '🌾', 'symbols': [
         ('sugar','SUGAR','🍬')]}
 }
+
+# =============== User-Agent رنج ===============
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; rv:109.0) Gecko/20100101 Firefox/119.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/119.0",
+]
 
 # =============== کش‌ها و قفل‌ها ===============
 price_cache = {'data': {}, 'last_update': 0, 'lock': threading.Lock()}
@@ -49,38 +61,19 @@ def clean_old():        conn=sqlite3.connect(DB_PATH); c=conn.cursor(); c.execut
 def load_statuses():    conn=sqlite3.connect(DB_PATH); rows=conn.cursor().execute('SELECT user_id FROM auto_send_settings WHERE active=1').fetchall(); conn.close(); [sending_active.__setitem__(uid[0], True) for uid in rows]; print(f"📂 {len(rows)} active users loaded.")
 def save_status(uid,a): conn=sqlite3.connect(DB_PATH); conn.cursor().execute('INSERT OR REPLACE INTO auto_send_settings VALUES (?,?)',(uid,1 if a else 0)); conn.commit(); conn.close()
 
-# =============== دریافت قیمت با Retry و لاگ ===============
-def fetch_yahoo_with_retry(sym, retries=3):
-    for attempt in range(retries):
-        try:
-            print(f"🔄 Fetching {sym} (attempt {attempt+1}/{retries})...")
-            resp = cffi_requests.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1h&range=1d",
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"},
-                impersonate="chrome120", timeout=8)
-            if resp.status_code != 200:
-                print(f"⚠️ Yahoo returned {resp.status_code} for {sym}")
-                continue
-            data = resp.json()
-            res = data['chart']['result'][0]
-            if 'meta' in res and res['meta'].get('regularMarketPrice') is not None:
-                price = float(res['meta']['regularMarketPrice'])
-                print(f"✅ {sym}: {price}")
-                return price
-            for p in reversed(res['indicators']['quote'][0]['close']):
-                if p is not None:
-                    print(f"✅ {sym}: {p}")
-                    return float(p)
-            print(f"⚠️ No price found for {sym}")
-        except Exception as e:
-            print(f"❌ Error fetching {sym}: {e}")
-            if attempt < retries - 1:
-                print(f"⏳ Retrying in 2 seconds...")
-                time.sleep(2)
-    print(f"❌ Failed to fetch {sym} after {retries} attempts")
-    return None
-
+# =============== دریافت قیمت با User-Agent رنج ===============
 def fetch_yahoo(sym):
-    return fetch_yahoo_with_retry(sym, retries=3)
+    try:
+        headers = {"User-Agent": random.choice(USER_AGENTS)}
+        resp = cffi_requests.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1h&range=1d",
+            headers=headers, impersonate="chrome120", timeout=8)
+        data = resp.json()
+        res = data['chart']['result'][0]
+        if 'meta' in res and res['meta'].get('regularMarketPrice') is not None:
+            return float(res['meta']['regularMarketPrice'])
+        for p in reversed(res['indicators']['quote'][0]['close']):
+            if p is not None: return float(p)
+    except: return None
 
 def is_holiday():
     with holiday_cache['lock']:
@@ -106,20 +99,14 @@ def is_market_open(sym):
     return True
 
 def fetch_price(sym):
-    if not is_market_open(sym):
-        print(f"⏸️ Market closed for {sym}")
-        return None
+    if not is_market_open(sym): return None
     mapping = {'gram':'GRAM-USD','btc':'BTC-USD','eth':'ETH-USD','bnb':'BNB-USD','xrp':'XRP-USD','sol':'SOL-USD','doge':'DOGE-USD','bch':'BCH-USD','ltc':'LTC-USD','trx':'TRX-USD','gold':'XAUT-USD','silver':'SI=F','oil':'CL=F','brent':'BZ=F','gas':'NG=F','sugar':'SB=F'}
-    price = fetch_yahoo(mapping[sym])
-    return round(price/100, 4) if sym == 'sugar' and price else price
+    return fetch_yahoo(mapping[sym])
 
-# =============== کش قیمت‌ها با لاگ بیشتر ===============
+# =============== کش قیمت‌ها ===============
 def refresh_cache():
     with price_cache['lock']:
-        now = time.time()
-        if now - price_cache['last_update'] < INTERVAL:
-            print(f"⏩ Cache is fresh (last update {price_cache['last_update']})")
-            return
+        if time.time() - price_cache['last_update'] < INTERVAL: return
         print(f"🔄 Updating price cache at {datetime.now().isoformat()}")
         data = {}
         for sym in SYMBOLS:
@@ -128,14 +115,9 @@ def refresh_cache():
             if new is not None:
                 data[sym] = {'new': new, 'old': old}
                 save_price(sym, new)
-                print(f"✅ Updated {sym}: {new}")
             else:
                 last = get_last_price(sym)
-                if last is not None:
-                    data[sym] = {'new': last, 'old': old}
-                    print(f"⚠️ Using last price for {sym}: {last}")
-                else:
-                    print(f"❌ No price available for {sym}")
+                if last is not None: data[sym] = {'new': last, 'old': old}
         price_cache['data'], price_cache['last_update'] = data, time.time()
         clean_old()
 
@@ -238,7 +220,7 @@ async def button(update, ctx):
     if data == "start_sending":
         if not get_user_sels(uid): await q.edit_message_text("⚠️ حداقل یک نماد انتخاب کنید.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_categories")]])); return
         with sending_lock: sending_active[uid], last_sent_summary[uid] = True, ""
-        save_status(uid, True); await q.edit_message_text("🚀 **ارسال خودکار شروع شد!**\nهر ۱ دقیقه قیمت‌ها ارسال می‌شود.", parse_mode='Markdown'); return
+        save_status(uid, True); await q.edit_message_text("🚀 **ارسال خودکار شروع شد!**\nهر ۱۰ دقیقه قیمت‌ها ارسال می‌شود.", parse_mode='Markdown'); return
     if data == "stop_sending":
         with sending_lock: sending_active[uid] = False
         save_status(uid, False); await q.edit_message_text("🛑 **ارسال خودکار متوقف شد.**", parse_mode='Markdown'); return
@@ -270,8 +252,7 @@ async def auto_loop():
     load_statuses()
     while True:
         try:
-            print("⏳ New cycle...")
-            refresh_cache()
+            print("⏳ New cycle..."); refresh_cache()
             with sending_lock:
                 for uid in list(sending_active.keys()):
                     if not sending_active[uid]: continue
@@ -289,9 +270,7 @@ async def auto_loop():
                         except Exception as e: print(f"⚠️ Send error to {uid}: {e}")
             if time.time() - last_clean > 600: last_clean = time.time()
             await asyncio.sleep(INTERVAL)
-        except Exception as e:
-            print(f"❌ Loop error: {e}")
-            await asyncio.sleep(INTERVAL)
+        except Exception as e: print(f"❌ Loop error: {e}"); await asyncio.sleep(INTERVAL)
 
 def start_loop(): asyncio.run(auto_loop())
 
