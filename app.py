@@ -1,5 +1,6 @@
 import os, asyncio, time, sqlite3, requests, re, json, logging, threading
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from curl_cffi import requests as cffi_requests
 from flask import Flask
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -9,9 +10,12 @@ from telegram.error import Forbidden
 os.environ['TZ'] = 'UTC'
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 if not TELEGRAM_TOKEN: raise ValueError("TELEGRAM_TOKEN is not set!")
-INTERVAL = 600  # ← تغییر به ۱۰ دقیقه (۶۰۰ ثانیه)
+INTERVAL = 600  # 10 دقیقه
 TIMEOUT, DB_PATH = 30, "market_data.db"
 logging.basicConfig(level=logging.INFO)
+
+# =============== منطقه زمانی بازار نیویورک ===============
+NEW_YORK_TZ = ZoneInfo("America/New_York")
 
 CATEGORIES = {
     'crypto': {'name': 'ارزهای دیجیتال', 'emoji': '💰', 'symbols': [
@@ -64,58 +68,102 @@ def fetch_yahoo(sym):
             if p is not None: return float(p)
     except: return None
 
+# =============== تشخیص تعطیلات رسمی (بر اساس منطقه NY) ===============
 def is_holiday():
     with holiday_cache['lock']:
-        today = datetime.now().strftime('%Y-%m-%d')
-        if holiday_cache['date'] == today: return holiday_cache['is_holiday']
+        now = datetime.now(NEW_YORK_TZ)
+        today = now.strftime('%Y-%m-%d')
+        if holiday_cache['date'] == today:
+            return holiday_cache['is_holiday']
         api_key = os.environ.get('CALENDARIFIC_API_KEY')
-        if not api_key: holiday_cache['date'], holiday_cache['is_holiday'] = today, False; return False
+        if not api_key:
+            holiday_cache['date'], holiday_cache['is_holiday'] = today, False
+            return False
         try:
-            r = requests.get(f"https://calendarific.com/api/v2/holidays?api_key={api_key}&country=US&year={datetime.now().year}&day={today}", timeout=5)
+            year = now.year
+            r = requests.get(
+                f"https://calendarific.com/api/v2/holidays?api_key={api_key}&country=US&year={year}&day={today}",
+                timeout=5
+            )
             if r.status_code == 200 and r.json().get('meta', {}).get('code') == 200:
                 h = r.json().get('response', {}).get('holidays', [])
-                if h: print(f"📅 Holiday: {h[0].get('name')}"); holiday_cache['date'], holiday_cache['is_holiday'] = today, True; return True
-        except Exception as e: print(f"⚠️ Holiday check error: {e}")
-        holiday_cache['date'], holiday_cache['is_holiday'] = today, False; return False
+                if h:
+                    print(f"📅 Holiday: {h[0].get('name')}")
+                    holiday_cache['date'], holiday_cache['is_holiday'] = today, True
+                    return True
+        except Exception as e:
+            print(f"⚠️ Holiday check error: {e}")
+        holiday_cache['date'], holiday_cache['is_holiday'] = today, False
+        return False
 
+# =============== تشخیص باز/بسته بودن بازار ===============
 def is_market_open(sym):
-    if sym in ['btc','eth','bnb','gram','xrp','sol','doge','bch','ltc','trx','dot']: return True
-    if datetime.now().weekday() in [5,6] or is_holiday(): return False
+    # ارزهای دیجیتال ۲۴/۷
+    if sym in ['btc','eth','bnb','gram','xrp','sol','doge','bch','ltc','trx','dot']:
+        return True
+
+    # بازارهای جهانی بر اساس منطقه NY
+    now = datetime.now(NEW_YORK_TZ)
+    # شنبه و یکشنبه
+    if now.weekday() in [5, 6]:
+        return False
+    # تعطیلات رسمی آمریکا
+    if is_holiday():
+        return False
+
+    # قوانین خاص برای شکر (ساعت کاری)
     if sym == 'sugar':
-        h = (datetime.now().hour + 3) % 24; m = datetime.now().minute + 30
-        if m >= 60: h, m = (h+1)%24, m-60
+        iran_now = datetime.now(ZoneInfo("Asia/Tehran"))
+        h = (iran_now.hour + 3) % 24
+        m = iran_now.minute + 30
+        if m >= 60:
+            h = (h + 1) % 24
+            m -= 60
         return 12 <= h < 21 or (h == 21 and m <= 30)
+
     return True
 
 def fetch_price(sym):
-    if not is_market_open(sym): return None
+    if not is_market_open(sym):
+        return None
     mapping = {'gram':'GRAM-USD','btc':'BTC-USD','eth':'ETH-USD','bnb':'BNB-USD','xrp':'XRP-USD','sol':'SOL-USD','doge':'DOGE-USD','bch':'BCH-USD','ltc':'LTC-USD','trx':'TRX-USD','gold':'XAUT-USD','silver':'SI=F','oil':'CL=F','brent':'BZ=F','gas':'NG=F','sugar':'SB=F'}
     price = fetch_yahoo(mapping[sym])
     return round(price/100, 4) if sym == 'sugar' and price else price
 
-# =============== کش قیمت‌ها ===============
+# =============== کش قیمت‌ها با ذخیره وضعیت بازار ===============
 def refresh_cache():
     with price_cache['lock']:
-        if time.time() - price_cache['last_update'] < INTERVAL: return
+        if time.time() - price_cache['last_update'] < INTERVAL:
+            return
         print(f"🔄 Updating price cache at {datetime.now().isoformat()}")
         data = {}
         for sym in SYMBOLS:
+            market_open = is_market_open(sym)
             old = get_price_24h(sym)
-            new = fetch_price(sym)
-            if new is not None:
-                data[sym] = {'new': new, 'old': old}
-                save_price(sym, new)
+            if market_open:
+                new = fetch_price(sym)
+                if new is not None:
+                    data[sym] = {'new': new, 'old': old, 'market_open': True}
+                    save_price(sym, new)
+                else:
+                    last = get_last_price(sym)
+                    if last is not None:
+                        data[sym] = {'new': last, 'old': old, 'market_open': True}
             else:
+                # بازار بسته است → آخرین قیمت معتبر را نگه می‌داریم
                 last = get_last_price(sym)
-                if last is not None: data[sym] = {'new': last, 'old': old}
-        price_cache['data'], price_cache['last_update'] = data, time.time()
+                data[sym] = {'new': last, 'old': old, 'market_open': False}
+        price_cache['data'] = data
+        price_cache['last_update'] = time.time()
         clean_old()
 
 def get_price(sym):
     refresh_cache()
     with price_cache['lock']:
         d = price_cache['data'].get(sym)
-        return (d['new'], d['old']) if d else (None, None)
+        if not d:
+            return None, None, None
+        return d.get('new'), d.get('old'), d.get('market_open', True)
 
 # =============== پیام‌ها و کیبورد ===============
 def fmt_price(p, s): return "⛔ در دسترس نیست" if p is None else f"{p:,.4f}" if s=='gram' else f"{p:,.2f}" if p>=1 else f"{p:.6f}"
@@ -128,14 +176,21 @@ def gen_msg(selections):
         if not selected: continue
         lines.append(f"{cat['emoji']} {cat['name']}:")
         for sym, name, emoji in selected:
-            new, old = get_price(sym)
-            if new is None:
-                if not is_market_open(sym):
-                    last = get_last_price(sym)
-                    lines.append(f"{emoji} {name} : {fmt_price(last, sym)} 🔒 بازار بسته" if last else f"{emoji} {name} : 🔒 بازار بسته")
-                else: lines.append(f"{emoji} {name} : ⛔ در دسترس نیست")
+            new, old, market_open = get_price(sym)
+            # ===== بازار بسته =====
+            if market_open is False:
+                last = new if new is not None else get_last_price(sym)
+                if last is not None:
+                    lines.append(f"{emoji} {name} : {fmt_price(last, sym)} 🔒 بازار بسته")
+                else:
+                    lines.append(f"{emoji} {name} : 🔒 بازار بسته")
                 continue
-            change = ((new-old)/old*100) if old and old>0 else None
+            # ===== قیمت در دسترس نیست =====
+            if new is None:
+                lines.append(f"{emoji} {name} : ⛔ در دسترس نیست")
+                continue
+            # ===== قیمت عادی =====
+            change = ((new - old) / old * 100) if old and old > 0 else None
             lines.append(f"{emoji} {name} : {fmt_price(new, sym)} {fmt_change(change)}")
         lines.append("")
     return "\n".join(lines) or "هیچ نمادی انتخاب نشده است."
@@ -194,12 +249,15 @@ async def show_all(chat_id, uid, query=None):
 
 async def start(update, ctx): await show_main(update.effective_chat.id, update.effective_user.id)
 
+async def status_cmd(update, ctx):
+    cid = update.effective_chat.id
+    report = "📊 **وضعیت دیتابیس**\n\n" + "\n".join([f"🔹 {name}: {get_last_price(sym) or 'ندارد'}" for sym, name, _ in get_all_symbols()])
+    await send(cid, report)
+
 async def button(update, ctx):
     q = update.callback_query; await q.answer(); uid = q.from_user.id; cid = q.message.chat.id; data = q.data
     if data == "back_categories": await show_main(cid, uid, q); return
-    if data == "status":
-        report = "📊 **وضعیت دیتابیس**\n" + "\n".join([f"🔹 {n}: {get_last_price(k) or 'ندارد'}" for k,n,_ in get_all_symbols()])
-        await q.edit_message_text(report, parse_mode='Markdown'); return
+    if data == "status": await status_cmd(update, ctx); return
     if data == "clear_all": clear_user_sels(uid); await q.edit_message_text("🗑️ همه انتخاب‌ها پاک شد."); await show_main(cid, uid); return
     if data == "select_all": select_all(uid); await q.edit_message_text("📊 همه نمادها انتخاب شدند."); await show_all(cid, uid, q); return
     if data == "show_all": await show_all(cid, uid, q); return
@@ -220,13 +278,18 @@ async def button(update, ctx):
         await show_all(cid, uid, q)
 
 async def single(update, sym, name, emoji):
-    cid = update.effective_chat.id; new, old = get_price(sym)
-    if new is None:
-        last = get_last_price(sym)
-        if last is not None: await send(cid, f"{emoji} **{name}**\n💰 {fmt_price(last, sym)}" + (" 🔒 بازار بسته" if not is_market_open(sym) else ""))
-        else: await send(cid, f"{emoji} **{name}**\n🔒 بازار بسته" if not is_market_open(sym) else f"{emoji} {name}: ⛔ در دسترس نیست.")
+    cid = update.effective_chat.id; new, old, market_open = get_price(sym)
+    if market_open is False:
+        last = new if new is not None else get_last_price(sym)
+        if last is not None:
+            await send(cid, f"{emoji} **{name}**\n💰 {fmt_price(last, sym)}\n🔒 بازار بسته")
+        else:
+            await send(cid, f"{emoji} **{name}**\n🔒 بازار بسته")
         return
-    change = ((new-old)/old*100) if old and old>0 else None
+    if new is None:
+        await send(cid, f"{emoji} **{name}**\n⛔ در دسترس نیست.")
+        return
+    change = ((new - old) / old * 100) if old and old > 0 else None
     await send(cid, f"{emoji} **{name}**\n💰 {fmt_price(new, sym)}\n{fmt_change(change)}")
 
 async def all_status(update, ctx):
@@ -290,7 +353,7 @@ async def run_bot():
                 ('bch',lambda u,c: single(u,'bch','BCH','🔶')), ('ltc',lambda u,c: single(u,'ltc','LTC','⚡')),
                 ('trx',lambda u,c: single(u,'trx','TRX','🔴')), ('oil',lambda u,c: single(u,'oil','OIL','🛢️')),
                 ('brent',lambda u,c: single(u,'brent','BRENT','🛢️')), ('gas',lambda u,c: single(u,'gas','GAS','🔥')),
-                ('sugar',lambda u,c: single(u,'sugar','SUGAR','🍬')), ('all',all_status), ('status',lambda u,c: None)]:
+                ('sugar',lambda u,c: single(u,'sugar','SUGAR','🍬')), ('all',all_status), ('status',status_cmd)]:
         app.add_handler(CommandHandler(cmd[0], cmd[1]))
     app.add_handler(CallbackQueryHandler(button))
     await app.bot.delete_webhook(); print("✅ Webhook cleared.")
